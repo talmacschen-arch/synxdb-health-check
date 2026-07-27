@@ -1,4 +1,4 @@
-# hdw-health-check
+# synxdb-health-check
 
 This tool can be used for health check on HashData 2x/3x and CBDB databases.
 
@@ -10,11 +10,11 @@ This tool can be used for health check on HashData 2x/3x and CBDB databases.
 3. Passwordless `ssh` between master node and segment nodes for `gpadmin` user.
 
 ### Download and Install
-1. Download `hdw_health_check.py` and `config.yml` in this repo.
-2. Put above 2 files on master node and grant `execute` permission against `hdw_health_check.py`.
+1. Download `synxdb_health_check.py` and `config.yml` in this repo.
+2. Put above 2 files on master node and grant `execute` permission against `synxdb_health_check.py`.
 
 ```
-chmod +x hdw_health_check.py
+chmod +x synxdb_health_check.py
 ```
 3. Install following python library by the user who has `pip` permission.
 
@@ -37,7 +37,7 @@ pip install prettytable-1.0.1-py2.py3-none-any.whl
 
 1. (Optional) Update the `config.yml` file. 
 
-- **report_format**: `text` or `html`. The `text` format report is printed to the stdout and be saved to `hdw-health-check-YYYY-MM-DD.rpt` as well. The `html` format report is only saved to `hdw-health-check-YYYY-MM-DD.html`.
+- **report_format**: `text` or `html`. The `text` format report is printed to the stdout and be saved to `synxdb-health-check-YYYY-MM-DD.rpt` as well. The `html` format report is only saved to `synxdb-health-check-YYYY-MM-DD.html`.
 - **rreport_path**: Set the path where the report will be generated to. By default, the report will be created at `/home/gpadmin`.
 - **enabled**: Set `true` or `false` to enable or disable a specific check item. By default, all items in the config file will be checked.
 
@@ -46,18 +46,18 @@ pip install prettytable-1.0.1-py2.py3-none-any.whl
 - In Hashdata 2x/3x:
 
 ```
-python ./hdw_health_check.py -f config.yml
+python ./synxdb_health_check.py -f config.yml
 ```
 
 - In CBDB:
 
 ```
-python3 ./hdw_health_check.py -f config.yml
+python3 ./synxdb_health_check.py -f config.yml
 ```
 
 ## Configurable Parameters
 
-The following parameters in `hdw_health_check.py` can be configured if needed.
+The following parameters in `synxdb_health_check.py` can be configured if needed.
 
 | Parameter  | Description | 
 |:------------|:------------|

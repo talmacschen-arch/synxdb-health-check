@@ -1060,7 +1060,7 @@ def stale_stats_check(db_list,rpt_format):
     return (check_item, check_result, stale_stats_check_output)
 
 ##################  Main function ################## 
-def hdw_health_check(configs):
+def synxdb_health_check(configs):
     #### Connect DB and get hosts list in cluster
     rpt_format = configs['report_format']
     dbconn = pgdb.connect(database='postgres', host='{0}:{1}'.format(MASTER_HOST_NAME,MASTER_PORT), user='gpadmin')
@@ -1196,7 +1196,7 @@ def hdw_health_check(configs):
 
     if rpt_format == 'text':
         report_header = (
-            '# Database Health Check Report\n'
+            '# SynxDB Health Check Report\n'
             'Report Date: %s\n\n'
         ) % (report_time)
         check_summary_output = '## Database Check Summary\n'
@@ -1207,11 +1207,11 @@ def hdw_health_check(configs):
             <html>
                 <head>
                     <title>
-                        Database Health Check Report
+                        SynxDB Health Check Report
                     </title>
                 </head>
                 <body>
-                    <H1>Database Health Check Report</H1>
+                    <H1>SynxDB Health Check Report</H1>
                     <p><b>Report Date:<b> %s</p>
         """ % (report_time)
         check_summary_output = '<h2>Database Check Summary</h2>'
@@ -1261,7 +1261,7 @@ def hdw_health_check(configs):
     report_suffix = '.rpt'
     if rpt_format == 'html':
         report_suffix = '.html'
-    report_file = report_path + '/hdw-health-check-' + time.strftime("%Y-%m-%d", time.localtime()) + report_suffix
+    report_file = report_path + '/synxdb-health-check-' + time.strftime("%Y-%m-%d", time.localtime()) + report_suffix
     report_output_without_color_flag  = re.sub(r'\033\[.*m','',report_output)
     f = codecs.open(report_file, 'w', 'utf-8')
     f.write(report_output_without_color_flag)
@@ -1284,7 +1284,7 @@ def main():
             print(args.file.name + ' is not a valid YAML config file.\n')
             parser.print_usage()
             return sys.exit(1)
-    hdw_health_check(configs)
+    synxdb_health_check(configs)
      
 if __name__ == "__main__":
     main()
