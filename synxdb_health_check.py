@@ -404,11 +404,7 @@ def get_db_list(dbconn):
 def get_pg_version(dbconn):
     cursor = execSQL(dbconn, 'select version()')
     pg_version = cursor.fetchone()
-    if 'HashData Warehouse 3' in pg_version[0]:
-        pg_kernal = 'legacy3'
-    elif 'HashData Warehouse 2' in pg_version[0]:
-        pg_kernal = 'legacy2'
-    elif 'Cloudberry' in pg_version[0]:
+    if 'Cloudberry' in pg_version[0]:
         pg_kernal = 'cbdb'
     return pg_kernal
 
