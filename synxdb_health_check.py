@@ -74,6 +74,9 @@ select name as name, setting as setting from pg_settings where name in (
 ,'join_collapse_limit')
 '''
 get_resqueue_sql = 'SELECT * FROM gp_toolkit.gp_resqueue_status'
+get_resgroup_sql = 'SELECT * FROM gp_toolkit.gp_resgroup_config'
+get_resource_manager_sql = 'show gp_resource_manager'
+get_resource_manager_gpconfig_cmd = 'gpconfig -s gp_resource_manager'
 check_standby_sql_pg9 = 'SELECT pid, state FROM pg_stat_replication'
 check_standby_sql_pg8 = 'SELECT procpid, state FROM pg_stat_replication'
 get_pg_activity_sql_pg14 = '''
@@ -392,6 +395,22 @@ def _execute_shell_command(bash_command):
     except subprocess.CalledProcessError as e:
         output = str(e)
     return output
+
+def get_resource_manager_mode(dbconn):
+    # Prefer the cluster-wide persisted value from gpconfig; the coordinator
+    # (a.k.a. master on older versions) value is authoritative here.
+    mode = ''
+    gpconfig_output = _execute_shell_command(get_resource_manager_gpconfig_cmd)
+    for line in gpconfig_output.splitlines():
+        matched = re.search(r'(?:Coordinator|Master)\s+value:\s*(\S+)', line)
+        if matched:
+            mode = matched.group(1)
+            break
+    # Fall back to the session GUC if gpconfig output could not be parsed.
+    if not mode:
+        cursor = execSQL(dbconn, get_resource_manager_sql)
+        mode = cursor.fetchone()[0]
+    return mode
 
 def check_items_output(check_item, check_result, check_result_detail, rpt_format):
     green_print_flag = '\033[1;32m'
@@ -849,6 +868,33 @@ def resqueue_check(dbconn,rpt_format):
     resqueues_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
     return (check_item, check_result, resqueues_check_output)
 
+def resgroup_check(dbconn,resource_manager,rpt_format):
+    check_item = 'Resource Groups Setting'
+    check_result = 'OK'
+    check_result_detail = ''
+    builtin_groups = ['default_group', 'admin_group', 'system_group']
+    cursor = execSQL(dbconn,get_resgroup_sql)
+    resgroups = cursor.fetchall()
+    column_names_list = [row[0] for row in cursor.description]
+    groupname_idx = column_names_list.index('groupname')
+    check_result_table = PrettyTable(column_names_list)
+    for row in resgroups:
+        check_result_table.add_row(row)
+    custom_groups = [row[groupname_idx] for row in resgroups if row[groupname_idx] not in builtin_groups]
+    if rpt_format == 'text':
+        check_result_detail = 'Resource manager mode: ' + resource_manager + '\n\n' + check_result_table.get_string()
+    if rpt_format == 'html':
+        check_result_detail = 'Resource manager mode: ' + resource_manager + '<br><br>' + check_result_table.get_html_string(attributes={
+            'width': '60%',
+            'align': 'left',
+            'BORDERCOLOR': '#330000',
+            'border': '2',
+        })
+    if resource_manager in ('group', 'group-v2') and len(custom_groups) == 0:
+        check_result = 'NOT OK'
+    resgroup_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
+    return (check_item, check_result, resgroup_check_output)
+
 def pg_activity_check(dbconn, pg_version, rpt_format):
     check_item = 'Current Long Running(> 1hr) Queries'
     check_result = 'OK'
@@ -1121,11 +1167,25 @@ def synxdb_health_check(configs):
         guc_check_output = guc_check(dbconn,rpt_format)
         report_output_list.append(guc_check_output)
         print('Done')
-    if configs['res_queue_check']['enabled']:
-        print('Checking resource queue settings...')
-        resqueue_check_output = resqueue_check(dbconn,rpt_format)
-        report_output_list.append(resqueue_check_output)
-        print('Done')
+    # Resource management: for CBDB/SynxDB pick the active mechanism based on
+    # gp_resource_manager. In group/group-v2 mode only the resource group check
+    # is relevant; in queue mode only the resource queue check is. Legacy 2x/3x
+    # have no resource groups, so they always use the resource queue check.
+    resource_manager = ''
+    if pg_version == 'cbdb':
+        resource_manager = get_resource_manager_mode(dbconn)
+    if pg_version == 'cbdb' and resource_manager in ('group', 'group-v2'):
+        if configs['resgroup_check']['enabled']:
+            print('Checking resource group settings...')
+            resgroup_check_output = resgroup_check(dbconn, resource_manager, rpt_format)
+            report_output_list.append(resgroup_check_output)
+            print('Done')
+    else:
+        if configs['res_queue_check']['enabled']:
+            print('Checking resource queue settings...')
+            resqueue_check_output = resqueue_check(dbconn,rpt_format)
+            report_output_list.append(resqueue_check_output)
+            print('Done')
     if configs['pg_activity_check']['enabled']:
         print('Checking current long running queries...')
         pg_activity_check_output = pg_activity_check(dbconn, pg_version,rpt_format)

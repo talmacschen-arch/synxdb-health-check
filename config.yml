@@ -35,6 +35,9 @@ guc_check:
 res_queue_check:
   enabled: true
 
+resgroup_check:
+  enabled: true
+
 db_size_check:
   enabled: true
 
