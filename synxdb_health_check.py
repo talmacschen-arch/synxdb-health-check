@@ -41,37 +41,67 @@ get_db_version_sql = 'select version()'
 get_db_names_sql = '''select datname from pg_database where datname not in ('template0','template1','postgres')'''
 get_segment_config_sql = 'select dbid,content,role,preferred_role,mode,status,port,hostname,address from gp_segment_configuration order by dbid'
 get_hosts_sql = 'select distinct(hostname) as hostname from gp_segment_configuration order by hostname'
+# Union of the health-check's historical GUC list and the parameters shown on
+# the DBCC console (dbcc-core-server application-guc.configuration.yml). Both
+# coordinator and segment values are reported, matching the DBCC console.
+# The parameter names drive the query via a VALUES list and LEFT JOINs so that
+# a parameter absent in the running version (e.g. legacy GPDB GUCs removed in
+# PG14/SynxDB4) is still listed, with blank values, instead of silently dropped.
+# coordinator_value comes from pg_settings (this connection is on the coordinator);
+# segment_value comes from gp_toolkit.gp_param_settings() for segment content 0.
 get_guc_sql = '''
-select name as name, setting as setting from pg_settings where name in (
-'log_statement'
-,'checkpoint_segments'
-,'gp_fts_probe_timeout'
-,'gp_fts_probe_interval'
-,'gp_segment_connect_timeout'
-,'max_fsm_pages'
-,'max_fsm_relations'
-,'max_stack_depth'
-,'max_appendonly_tables'
-,'gp_external_max_segs'
-,'gp_autostats_mode'
-,'gp_autostats_on_change_threshold'
-,'gp_filerep_tcp_keepalives_count'
-,'gp_filerep_tcp_keepalives_interval'
-,'gp_vmem_protect_limit'
-,'max_statement_mem'
-,'gp_external_enable_exec'
-,'statement_timeout'
-,'gp_interconnect_type'
-,'gp_analyze_relative_error'
-,'default_statistics_target'
-,'gp_workfile_limit_per_query'
-,'superuser_reserved_connections'
-,'gp_workfile_compress_algorithm'
-,'max_connections'
-,'max_prepared_transactions'
-,'shared_buffers'
-,'gpperfmon_log_alert_level'
-,'join_collapse_limit')
+SELECT p.name AS name,
+       COALESCE(c.setting, '') AS coordinator_value,
+       COALESCE(s.paramvalue, '') AS segment_value
+FROM (VALUES
+ ('autovacuum')
+,('checkpoint_segments')
+,('default_statistics_target')
+,('gp_analyze_relative_error')
+,('gp_appendonly_insert_files')
+,('gp_autostats_mode')
+,('gp_autostats_on_change_threshold')
+,('gp_enable_runtime_filter_pushdown')
+,('gp_external_enable_exec')
+,('gp_external_max_segs')
+,('gp_filerep_tcp_keepalives_count')
+,('gp_filerep_tcp_keepalives_interval')
+,('gp_fts_probe_interval')
+,('gp_fts_probe_timeout')
+,('gp_interconnect_queue_depth')
+,('gp_interconnect_snd_queue_depth')
+,('gp_interconnect_tcp_listener_backlog')
+,('gp_interconnect_type')
+,('gp_resqueue_priority_cpucores_per_segment')
+,('gp_segment_connect_timeout')
+,('gp_vmem_protect_limit')
+,('gp_workfile_compress_algorithm')
+,('gp_workfile_limit_files_per_query')
+,('gp_workfile_limit_per_query')
+,('gp_workfile_limit_per_segment')
+,('gpperfmon_log_alert_level')
+,('join_collapse_limit')
+,('log_duration')
+,('log_statement')
+,('max_appendonly_tables')
+,('max_connections')
+,('max_fsm_pages')
+,('max_fsm_relations')
+,('max_prepared_transactions')
+,('max_stack_depth')
+,('max_statement_mem')
+,('optimizer')
+,('password_encryption')
+,('pg_gophermeta.register_gophermeta')
+,('shared_buffers')
+,('statement_mem')
+,('statement_timeout')
+,('superuser_reserved_connections')
+,('work_mem')
+) AS p(name)
+LEFT JOIN pg_settings AS c ON c.name = p.name
+LEFT JOIN gp_toolkit.gp_param_settings() AS s ON s.paramname = p.name AND s.paramsegment = 0
+ORDER BY p.name
 '''
 get_resqueue_sql = 'SELECT * FROM gp_toolkit.gp_resqueue_status'
 get_resgroup_sql = 'SELECT * FROM gp_toolkit.gp_resgroup_config'
