@@ -1,11 +1,11 @@
 # synxdb-health-check
 
-This tool can be used for health check on HashData 2x/3x and CBDB databases.
+This tool can be used for health check on SynxDB, CBDB and legacy 2x/3x databases.
 
 ## Setup
 
 ### Prerequisites
-1. A running HashData 2x/3x or CBDB database with `gpadmin` access.
+1. A running SynxDB, CBDB or legacy 2x/3x database with `gpadmin` access.
 2. `root` access or an OS user with `pip` permission on `master` node.
 3. Passwordless `ssh` between master node and segment nodes for `gpadmin` user.
 
@@ -43,7 +43,7 @@ pip install prettytable-1.0.1-py2.py3-none-any.whl
 
 2. Run the health check using `gpadmin`.
 
-- In Hashdata 2x/3x:
+- On legacy 2x/3x (Python 2):
 
 ```
 python ./synxdb_health_check.py -f config.yml

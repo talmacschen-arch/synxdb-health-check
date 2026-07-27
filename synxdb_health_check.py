@@ -276,7 +276,7 @@ and COALESCE(last_autoanalyze,'2022-01-01',last_analyze) < now() - interval '{1}
 order by schemaname, relname
 '''.format(TABLE_MIN_TUPLES_FOR_CHECK, WITHOUT_ANALYZE_DAYS)
 get_heap_bloat_sql = 'select * from gp_toolkit.gp_bloat_diag where bdiexppages*100/bdirelpages <={0} order by bdiexppages/bdirelpages desc limit 20'.format(TABLE_BLOAT_PERCENT)
-get_hdw2_ao_bloat_sql = '''
+get_legacy2_ao_bloat_sql = '''
 select * from (
 SELECT 
 c.oid, 
@@ -296,7 +296,7 @@ where percent_hidden > {1}
 get_ao_table_list_sql = '''
 select n.nspname as schemaname,c.relname as tablename ,ap.segrelid::regclass as ao_table from pg_class c join pg_namespace n on c.relnamespace=n.oid join pg_appendonly ap on c.oid=ap.relid where c.relkind='r' and c.reltuples > {0} and n.nspname  not like 'pg_%'
 '''.format(TABLE_MIN_TUPLES_FOR_CHECK)
-get_hdw3_ao_bloat_sql_base = 'select sum(extraindexnum) from '
+get_legacy3_ao_bloat_sql_base = 'select sum(extraindexnum) from '
 
 get_db_oid_sql = 'select oid from pg_database where datname = current_database()'
 
@@ -379,9 +379,9 @@ def get_pg_version(dbconn):
     cursor = execSQL(dbconn, 'select version()')
     pg_version = cursor.fetchone()
     if 'HashData Warehouse 3' in pg_version[0]:
-        pg_kernal = 'hdw3'
+        pg_kernal = 'legacy3'
     elif 'HashData Warehouse 2' in pg_version[0]:
-        pg_kernal = 'hdw2'
+        pg_kernal = 'legacy2'
     elif 'Cloudberry' in pg_version[0]:
         pg_kernal = 'cbdb'
     return pg_kernal
@@ -623,7 +623,7 @@ def standby_check(dbconn, pg_version, rpt_format):
     check_result_detail = ''
     if pg_version == 'cbdb':
         cursor = execSQL(dbconn, check_standby_sql_pg9)
-    if pg_version == 'hdw2':
+    if pg_version == 'legacy2':
         cursor = execSQL(dbconn, check_standby_sql_pg8)
     standby_output = cursor.fetchone()
     column_names_list = [row[0] for row in cursor.description]
@@ -751,7 +751,7 @@ def data_skew_check(pg_version,db_list,rpt_format):
     check_result_detail = ''
     for db in db_list:
         dbconn = pgdb.connect(database=db, host='{0}:{1}'.format(MASTER_HOST_NAME,MASTER_PORT), user='gpadmin')
-        if pg_version == 'hdw2':
+        if pg_version == 'legacy2':
             create_function_output = execSQL(dbconn,create_data_skew_fn_sql)
             cursor = execSQL(dbconn,get_data_skew_sql)
             get_data_skew_result = cursor.fetchall()
@@ -787,7 +787,7 @@ def data_skew_check(pg_version,db_list,rpt_format):
                     check_result_table.add_row([schema_name, table_name, 'pax', 'skew_coeff%', skew_coeff])
             check_result_table.sortby = "value"
             check_result_table.reversesort = True
-        elif pg_version == 'hdw3':
+        elif pg_version == 'legacy3':
             cursor = execSQL(dbconn,get_ao_table_list_sql)
             table_list = cursor.fetchall()
             if len(table_list) == 0:
@@ -855,9 +855,9 @@ def pg_activity_check(dbconn, pg_version, rpt_format):
     check_result_detail = ''
     if pg_version == 'cbdb':
         cursor = execSQL(dbconn, get_pg_activity_sql_pg14)
-    if pg_version == 'hdw3':
+    if pg_version == 'legacy3':
         cursor = execSQL(dbconn, get_pg_activity_sql_pg9)
-    if pg_version == 'hdw2':
+    if pg_version == 'legacy2':
         cursor = execSQL(dbconn, get_pg_activity_sql_pg8)
     pg_activity_result = cursor.fetchall()
     column_names_list = [row[0] for row in cursor.description]
@@ -882,9 +882,9 @@ def pg_locks_check(dbconn, pg_version, rpt_format):
     check_item = 'Current Database Locks'
     check_result = 'OK'
     check_result_detail = ''
-    if pg_version == 'hdw3' or pg_version == 'cbdb':
+    if pg_version == 'legacy3' or pg_version == 'cbdb':
         cursor = execSQL(dbconn, get_pg_locks_sql_pg9)
-    if pg_version == 'hdw2':
+    if pg_version == 'legacy2':
         cursor = execSQL(dbconn, get_pg_locks_sql_pg8)
     pg_locks_result = cursor.fetchall()
     column_names_list = [row[0] for row in cursor.description]
@@ -938,8 +938,8 @@ def ao_table_bloat_check(pg_version, db_list, rpt_format):
     check_result_detail = ''
     for db in db_list:
         dbconn = pgdb.connect(database=db, host='{0}:{1}'.format(MASTER_HOST_NAME,MASTER_PORT), user='gpadmin')
-        if pg_version == 'hdw2' or pg_version == 'cbdb':
-            cursor = execSQL(dbconn, get_hdw2_ao_bloat_sql)
+        if pg_version == 'legacy2' or pg_version == 'cbdb':
+            cursor = execSQL(dbconn, get_legacy2_ao_bloat_sql)
             bloat_result = cursor.fetchall()
             column_names_list = [row[0] for row in cursor.description]
             bloat_table = PrettyTable(column_names_list)
@@ -947,7 +947,7 @@ def ao_table_bloat_check(pg_version, db_list, rpt_format):
                 check_result = 'NOT OK'
                 for row in bloat_result:
                     bloat_table.add_row(row)
-        if pg_version == 'hdw3':
+        if pg_version == 'legacy3':
             cursor = execSQL(dbconn,get_ao_table_list_sql)
             table_list = cursor.fetchall()
             if len(table_list) == 0:
@@ -957,7 +957,7 @@ def ao_table_bloat_check(pg_version, db_list, rpt_format):
                 schema_name = table[0]
                 table_name = table[1]
                 ao_seg_name = table[2].replace('\'', '')
-                get_bloat_sql = get_hdw3_ao_bloat_sql_base + ao_seg_name
+                get_bloat_sql = get_legacy3_ao_bloat_sql_base + ao_seg_name
                 cursor = execSQL(dbconn, get_bloat_sql)
                 bloat_result = cursor.fetchone()
                 if None in bloat_result:
@@ -1106,12 +1106,12 @@ def synxdb_health_check(configs):
         host_load_check_output = host_load_check(hosts_list,rpt_format)
         report_output_list.append(host_load_check_output)
         print('Done')
-    if configs['segments_status_check']['enabled'] and pg_version != 'hdw3':
+    if configs['segments_status_check']['enabled'] and pg_version != 'legacy3':
         print('Checking segment status...')
         segments_check_output = segments_check(rpt_format)
         report_output_list.append(segments_check_output)
         print('Done')
-    if configs['standby_status_check']['enabled'] and pg_version != 'hdw3':
+    if configs['standby_status_check']['enabled'] and pg_version != 'legacy3':
         print('Checking standby master status...')
         standby_check_output = standby_check(dbconn, pg_version,rpt_format)
         report_output_list.append(standby_check_output)
@@ -1151,7 +1151,7 @@ def synxdb_health_check(configs):
         table_size_check_output = table_size_check(db_list,rpt_format)
         report_output_list.append(table_size_check_output)
         print('Done')
-    if configs['heap_table_bloat_check']['enabled'] and pg_version != 'hdw3':
+    if configs['heap_table_bloat_check']['enabled'] and pg_version != 'legacy3':
         print('Checking bloated heap tables...')
         table_bloat_check_output = heap_table_bloat_check(db_list,rpt_format)
         report_output_list.append(table_bloat_check_output)
@@ -1171,12 +1171,12 @@ def synxdb_health_check(configs):
         stale_stats_check_output = stale_stats_check(db_list,rpt_format)
         report_output_list.append(stale_stats_check_output)
         print('Done')
-    if configs['db_age_check']['enabled'] and pg_version != 'hdw3':
+    if configs['db_age_check']['enabled'] and pg_version != 'legacy3':
         print('Checking databases age...')
         db_age_check_output = db_age_check(dbconn,rpt_format)
         report_output_list.append(db_age_check_output)
         print('Done')
-#    if configs['table_age_check']['enabled'] and pg_version != 'hdw3':
+#    if configs['table_age_check']['enabled'] and pg_version != 'legacy3':
 #        print('Checking tables age...')
 #        table_age_check_output = table_age_check(db_list,rpt_format)
 #        report_output_list.append(table_age_check_output)
