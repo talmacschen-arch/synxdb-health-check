@@ -1,11 +1,11 @@
 # synxdb-health-check
 
-This tool can be used for health check on SynxDB, CBDB and legacy 2x/3x databases.
+This tool can be used for health check on SynxDB and CBDB databases.
 
 ## Setup
 
 ### Prerequisites
-1. A running SynxDB, CBDB or legacy 2x/3x database with `gpadmin` access.
+1. A running SynxDB or CBDB database with `gpadmin` access.
 2. `root` access or an OS user with `pip` permission on `master` node.
 3. Passwordless `ssh` between master node and segment nodes for `gpadmin` user.
 
@@ -41,15 +41,7 @@ pip install prettytable-1.0.1-py2.py3-none-any.whl
 - **rreport_path**: Set the path where the report will be generated to. By default, the report will be created at `/home/gpadmin`.
 - **enabled**: Set `true` or `false` to enable or disable a specific check item. By default, all items in the config file will be checked.
 
-2. Run the health check using `gpadmin`.
-
-- On legacy 2x/3x (Python 2):
-
-```
-python ./synxdb_health_check.py -f config.yml
-```
-
-- In CBDB:
+2. Run the health check as `gpadmin`.
 
 ```
 python3 ./synxdb_health_check.py -f config.yml
@@ -68,9 +60,8 @@ The following parameters in `synxdb_health_check.py` can be configured if needed
 |WITHOUT_ANALYZE_DAYS|The days for which tables have not been analyzed. (Default: 7 days)|
 |TABLE_MIN_TUPLES_FOR_CHECK|Tables with rowcounts > `TABLE_MIN_TUPLES_FOR_CHECK` will be checked,e.g. bloat check, skew check..etc. (Default: 100000)|
 |TABLE_BLOAT_PERCENT|The bloat percent the the `heap_table_bloat_check` and `ao_table_bloat_check`. (Default: 20%)|
-|TABLE_UPDATE_COUNT_3X|Get the AO tables list > `TABLE_UPDATE_COUNT_3X` update counts for 3x. (Default: 5000)|
 |TABLE_SKEW_PERCENT|Get the table list >  `TABLE_SKEW_PERCENT`% skew. (Default: 20%) |
-|TABLE_SKEW_MIN_SIZE_GB|Minimum on-disk size (GB) for a table to be reported by the file-size based skew check (CBDB/2x AO tables). (Default: 1GB) |
+|TABLE_SKEW_MIN_SIZE_GB|Minimum on-disk size (GB) for a table to be reported by the file-size based skew check (CBDB AO tables). (Default: 1GB) |
 
 
 ## Supported Check Items
@@ -87,13 +78,13 @@ The following parameters in `synxdb_health_check.py` can be configured if needed
 |segments_status_check|Check if there is any segments down. |
 |standby_status_check|Check if the standby master is sync or not. |
 |guc_check|Get current important GUCs setting|
-|res_queue_check|Get resource queue setting. If no resource queue other than `pg_default` exists, check result shows `NOT OK`. On CBDB/SynxDB this check only runs when the active resource manager (`gpconfig -s gp_resource_manager`) is `queue`; in a group mode it is skipped in favor of `resgroup_check`. Legacy 2x/3x always use this check.|
+|res_queue_check|Get resource queue setting. If no resource queue other than `pg_default` exists, check result shows `NOT OK`. On CBDB/SynxDB this check only runs when the active resource manager (`gpconfig -s gp_resource_manager`) is `queue`; in a group mode it is skipped in favor of `resgroup_check`.|
 |resgroup_check|Get resource group configuration from `gp_toolkit.gp_resgroup_config` together with the current `gp_resource_manager` mode. Only runs on CBDB/SynxDB when the active resource manager (`gpconfig -s gp_resource_manager`) is a group mode (`group`/`group-v2`); in `queue` mode it is skipped in favor of `res_queue_check`. If in a group mode but no user-defined resource group exists besides the built-in `default_group`/`admin_group`/`system_group`, the result is `NOT OK`.|
 |db_size_check|Get db size for all databases in cluster. **Note**: The DB size relies on the statstics. It could be inaccurate if the statistics are not up to date.|
 |schema_size_check|Get all schemas size in each database. **Note**: The schema size relies on the statstics. It could be inaccurate if the statistics are not up to date.|
 |table_size_check|Get top 100 size tables in each database. **Note**: The table size relies on the statstics. It could be inaccurate if the statistics are not up to date.|
-|data_skew_check| - For CBDB: PAX tables are checked server-side with `gp_toolkit.gp_skew_coefficient` (called one table at a time to avoid exhausting the cluster DSM slots); AO/AOCS tables are checked by comparing on-disk file size across each segment (table size > `TABLE_SKEW_MIN_SIZE_GB` and max-min segment gap > `TABLE_SKEW_PERCENT`% → `NOT OK`). Files are mapped to tables using each segment's own catalog because `relfilenode` is not consistent between the coordinator and segments. - For 2x, check data skew by comparing the file size on OS across each segment. - For 3x, compare the rowcounts across the segments.|
-|heap_table_bloat_check| For 2x and CBDB, get bloated heap table list.|
+|data_skew_check| - For CBDB: PAX tables are checked server-side with `gp_toolkit.gp_skew_coefficient` (called one table at a time to avoid exhausting the cluster DSM slots); AO/AOCS tables are checked by comparing on-disk file size across each segment (table size > `TABLE_SKEW_MIN_SIZE_GB` and max-min segment gap > `TABLE_SKEW_PERCENT`% → `NOT OK`). Files are mapped to tables using each segment's own catalog because `relfilenode` is not consistent between the coordinator and segments.|
+|heap_table_bloat_check| For CBDB, get bloated heap table list.|
 |ao_table_bloat_check|  Get the AO/AOCS bloated table list.|
 |db_age_check| Check db age for each database across all segments. The result will be `NOT OK` if the age reaches the warn limit `2^31-1 - xid_stop_limit`.|
 |temp_schema_check| Check master and all segments for any temp schemas existing.|
