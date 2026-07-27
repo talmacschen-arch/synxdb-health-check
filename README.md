@@ -87,7 +87,8 @@ The following parameters in `synxdb_health_check.py` can be configured if needed
 |segments_status_check|Check if there is any segments down. |
 |standby_status_check|Check if the standby master is sync or not. |
 |guc_check|Get current important GUCs setting|
-|res_queue_check|Get resource queue setting. If no resource queue other than `pg_default` exists, check result shows `NOT OK`.|
+|res_queue_check|Get resource queue setting. If no resource queue other than `pg_default` exists, check result shows `NOT OK`. On CBDB/SynxDB this check only runs when the active resource manager (`gpconfig -s gp_resource_manager`) is `queue`; in a group mode it is skipped in favor of `resgroup_check`. Legacy 2x/3x always use this check.|
+|resgroup_check|Get resource group configuration from `gp_toolkit.gp_resgroup_config` together with the current `gp_resource_manager` mode. Only runs on CBDB/SynxDB when the active resource manager (`gpconfig -s gp_resource_manager`) is a group mode (`group`/`group-v2`); in `queue` mode it is skipped in favor of `res_queue_check`. If in a group mode but no user-defined resource group exists besides the built-in `default_group`/`admin_group`/`system_group`, the result is `NOT OK`.|
 |db_size_check|Get db size for all databases in cluster. **Note**: The DB size relies on the statstics. It could be inaccurate if the statistics are not up to date.|
 |schema_size_check|Get all schemas size in each database. **Note**: The schema size relies on the statstics. It could be inaccurate if the statistics are not up to date.|
 |table_size_check|Get top 100 size tables in each database. **Note**: The table size relies on the statstics. It could be inaccurate if the statistics are not up to date.|
