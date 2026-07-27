@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-@author: Chen Liang
+@author: Liang
 """
 
 import subprocess
