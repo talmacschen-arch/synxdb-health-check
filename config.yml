@@ -29,6 +29,9 @@ segments_status_check:
 standby_status_check:
   enabled: true
 
+seg_role_balance_check:
+  enabled: true
+
 guc_check:
   enabled: true
 
@@ -59,14 +62,23 @@ ao_table_bloat_check:
 db_age_check:
   enabled: true
 
+db_mxid_age_check:
+  enabled: true
+
 temp_schema_check:
   enabled: true
 
 pg_activity_check:
   enabled: true
 
+idle_in_transaction_check:
+  enabled: true
+
 pg_locks_check:
   enabled: true
 
 stale_stats_check:
+  enabled: true
+
+invalid_index_check:
   enabled: true

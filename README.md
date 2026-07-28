@@ -56,6 +56,7 @@ The following parameters in `synxdb_health_check.py` can be configured if needed
 |MASTER_HOST_NAME|Database master hostname. (Default: localhost)|
 |MASTER_PORT|Database master port. (Default: 5432)|
 |LONG_RUNNING_QUERY_THRESHOLD|The long running query threshold for the `pg_activity_check`. (Default: 3600s)|
+|IDLE_IN_TRANSACTION_THRESHOLD|The threshold for how long a session may sit in `idle in transaction` before `idle_in_transaction_check` reports it. (Default: 600s)|
 |LOCK_HOLD_TIME|The lock time threshold for the `pg_locks_check`. (Default: 600s)|
 |WITHOUT_ANALYZE_DAYS|The days for which tables have not been analyzed. (Default: 7 days)|
 |TABLE_MIN_TUPLES_FOR_CHECK|Tables with rowcounts > `TABLE_MIN_TUPLES_FOR_CHECK` will be checked,e.g. bloat check, skew check..etc. (Default: 100000)|
@@ -78,6 +79,7 @@ The following parameters in `synxdb_health_check.py` can be configured if needed
 |host_load_check| Get `uptime` output for each host|
 |segments_status_check|Check if there is any segments down. |
 |standby_status_check|Check if the standby master is sync or not. |
+|seg_role_balance_check|Check `gp_segment_configuration` for segments whose current `role` differs from `preferred_role` (an FTS failover that never rebalanced, leaving one host with a double share of primaries) or, for data segments (`content >= 0`), whose `mode` is not `s` (still resyncing). The result is `NOT OK` if any such segment exists. The coordinator's own sync state is left to `standby_status_check`, so `mode` is only judged for `content >= 0` to avoid a false positive on mirrorless clusters.|
 |guc_check|Get current important GUCs setting|
 |res_queue_check|Get resource queue setting. If no resource queue other than `pg_default` exists, check result shows `NOT OK`. On CBDB/SynxDB this check only runs when the active resource manager (`gpconfig -s gp_resource_manager`) is `queue`; in a group mode it is skipped in favor of `resgroup_check`.|
 |resgroup_check|Get resource group configuration from `gp_toolkit.gp_resgroup_config` together with the current `gp_resource_manager` mode. Only runs on CBDB/SynxDB when the active resource manager (`gpconfig -s gp_resource_manager`) is a group mode (`group`/`group-v2`); in `queue` mode it is skipped in favor of `res_queue_check`. If in a group mode but no user-defined resource group exists besides the built-in `default_group`/`admin_group`/`system_group`, the result is `NOT OK`.|
@@ -88,14 +90,18 @@ The following parameters in `synxdb_health_check.py` can be configured if needed
 |heap_table_bloat_check| For CBDB, get bloated heap table list.|
 |ao_table_bloat_check|  Get the AO/AOCS bloated table list.|
 |db_age_check| Check db age for each database across all segments. The result will be `NOT OK` if the age reaches the warn limit `2^31-1 - xid_stop_limit`.|
+|db_mxid_age_check| Check the multixact age (`mxid_age(datminmxid)`) for each database across all segments. Multixact wraparound is an independent risk line from the plain XID age of `db_age_check` — a healthy `datfrozenxid` age does not imply a healthy multixact age. Uses the same warn/stop limit logic as `db_age_check`; the result is `NOT OK` if any database reaches the warn limit.|
 |temp_schema_check| Check master and all segments for any temp schemas existing.|
 |pg_activity_check|Check current running queries in database. The check result will be `NOT OK` if any query runs > 1hr.|
+|idle_in_transaction_check|Check for sessions sitting in `idle in transaction` (or `idle in transaction (aborted)`) longer than `IDLE_IN_TRANSACTION_THRESHOLD`, measured from `xact_start`. Such sessions hold back the global xmin, blocking vacuum and inflating XID/multixact age and bloat. The result is `NOT OK` if any such session exists.|
 |pg_locks_check| Check if there is any session holding the lock > 10mins.|
 |stale_stats_check|Get a list of tables which have not been analyzed.|
+|invalid_index_check|Check each database for indexes left in an unusable state — `indisvalid = false` (e.g. a failed `CREATE INDEX CONCURRENTLY`) or `indisready = false` (interrupted mid-build). The planner silently ignores such indexes, so queries degrade with no error. The result is `NOT OK` if any invalid index exists.|
 
 
 ## Changelog
 
+- **Add four health-check items based on GP7 inspection best practices.** `seg_role_balance_check` flags segments whose current `role` differs from `preferred_role` (unrebalanced FTS failover) or data segments still resyncing (`mode <> 's'`). `db_mxid_age_check` checks multixact wraparound age (`mxid_age(datminmxid)`), an independent risk line from the XID age already covered by `db_age_check`. `idle_in_transaction_check` reports sessions stuck in `idle in transaction` longer than `IDLE_IN_TRANSACTION_THRESHOLD` (holding back the global xmin). `invalid_index_check` reports indexes with `indisvalid = false` / `indisready = false`, which the planner silently ignores. All four are pure SQL with no external dependencies.
 - **Fix text report summary table rendering.** In the `text` (`.rpt`) report, the *Database Check Summary* table previously rendered with empty data cells (`|      |`) while the header and all detail tables were fine. The ANSI color-stripping step used a greedy pattern (`\033\[.*m`) that, on a colored summary row, deleted the cell text and column separators between the first and last escape code. The pattern is now anchored to the escape sequence (`\033\[[0-9;]*m`) so only the color codes are stripped.
 - **Give the PAX skew check its own threshold.** `data_skew_check` compared `gp_toolkit.gp_skew_coefficient`'s `skccoeff` (a coefficient of variation, `stddev/avg` of per-segment row counts) against `TABLE_SKEW_PERCENT`, the same value used for the AO/AOCS max-min gap metric. Because the CV is a different (typically smaller) metric than the gap, PAX tables were effectively judged more leniently. A dedicated `TABLE_SKEW_CV_PERCENT` (default 10, aligned with Greenplum's guidance to re-evaluate distribution above 10% skew) now controls the PAX/CV path; the AO/AOCS gap path keeps `TABLE_SKEW_PERCENT`.
 - **Fix `table_size_check` missing large partitioned and un-analyzed tables.** Top-100 table sizes are now aggregated by logical table — leaf partitions are rolled up to their root via `pg_partition_root` instead of ranking each partition separately, so a large partitioned table appears as a single entry. Tables that have never been analyzed (`relpages = -1`) now fall back to `pg_relation_size` instead of being dropped as size 0.

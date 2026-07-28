@@ -28,6 +28,7 @@ except:
 MASTER_HOST_NAME='localhost'
 MASTER_PORT=5432
 LONG_RUNNING_QUERY_THRESHOLD=3600
+IDLE_IN_TRANSACTION_THRESHOLD=600
 LOCK_HOLD_TIME=600
 WITHOUT_ANALYZE_DAYS=7
 TABLE_MIN_TUPLES_FOR_CHECK=100000
@@ -41,6 +42,18 @@ TABLE_SKEW_CV_PERCENT=10
 get_db_version_sql = 'select version()'
 get_db_names_sql = '''select datname from pg_database where datname not in ('template0','template1','postgres')'''
 get_segment_config_sql = 'select dbid,content,role,preferred_role,mode,status,port,hostname,address from gp_segment_configuration order by dbid'
+# Segment role balance / resync health. A segment whose current role differs
+# from its preferred_role means FTS failed over and never rebalanced (one host
+# ends up carrying a double share of primaries); a data segment (content >= 0)
+# whose mode is not 's' is still resyncing. The coordinator's own sync state is
+# covered by the standby check, so mode<>'s' is only flagged for content >= 0 to
+# avoid a false positive on mirrorless clusters where the coordinator is 'n'.
+get_seg_role_balance_sql = '''
+select dbid, content, role, preferred_role, mode, status, hostname
+from gp_segment_configuration
+where role <> preferred_role or (mode <> 's' and content >= 0)
+order by content, dbid
+'''
 get_hosts_sql = 'select distinct(hostname) as hostname from gp_segment_configuration order by hostname'
 # Union of the health-check's historical GUC list and the parameters shown on
 # the DBCC console (dbcc-core-server application-guc.configuration.yml). Both
@@ -118,6 +131,21 @@ select datname,procpid,sess_id,usename,application_name,client_addr,backend_star
 from pg_stat_activity
 where date_part('second', now()-query_start) > {0}
 '''.format(LONG_RUNNING_QUERY_THRESHOLD)
+# Sessions sitting in 'idle in transaction' hold back the global xmin, which
+# blocks vacuum, inflates XID/multixact age and drives bloat. Unlike the long
+# running query check (which looks at query_start) this keys off xact_start so a
+# session that ran one statement and then went idle mid-transaction is caught.
+# extract(epoch ...) yields the *total* seconds of the interval (date_part
+# 'second' would only return the 0-59 seconds component).
+get_idle_in_transaction_sql = '''
+select datname,pid,sess_id,usename,application_name,client_addr,state,xact_start,
+       extract(epoch from now()-xact_start)::int as idle_in_xact_sec,query
+from pg_stat_activity
+where state in ('idle in transaction','idle in transaction (aborted)')
+  and xact_start is not null
+  and extract(epoch from now()-xact_start) > {0}
+order by xact_start
+'''.format(IDLE_IN_TRANSACTION_THRESHOLD)
 get_pg_locks_sql_pg9 = '''
 select a.gp_segment_id, a.pid, a.mode, a.mppsessionid, c.nspname,b.relname, date_part('second', now()-d.query_start) as lock_duration_sec, d.query as query_hold_lock
 from pg_locks a, pg_class b, pg_namespace c, pg_stat_activity d
@@ -299,6 +327,27 @@ SELECT  gp_segment_id, datname, age,
 FROM cluster
 ORDER BY datname, gp_segment_id
 '''
+# Multixact wraparound is a risk line independent of the plain XID age checked
+# above: a healthy age(datfrozenxid) does not imply a healthy mxid_age. The
+# multixact space is also 2^31, so the same reserved stop/warn buffers used for
+# XID give a consistent warn threshold. Structure and the 'BELOW WARN LIMIT'
+# sentinel are kept identical to get_db_age_sql so the check logic is shared.
+get_db_mxid_age_sql = '''
+WITH cluster AS (
+	SELECT gp_segment_id, datname, mxid_age(datminmxid) age FROM pg_database
+	UNION ALL
+	SELECT gp_segment_id, datname, mxid_age(datminmxid) age FROM gp_dist_random('pg_database')
+)
+SELECT  gp_segment_id, datname, age,
+        CASE
+                WHEN age < (2^31-1 - current_setting('xid_stop_limit')::int - current_setting('xid_warn_limit')::int) THEN 'BELOW WARN LIMIT'
+                WHEN  ((2^31-1 - current_setting('xid_stop_limit')::int - current_setting('xid_warn_limit')::int) < age) AND (age <  (2^31-1 - current_setting('xid_stop_limit')::int)) THEN 'OVER WARN LIMIT and UNDER STOP LIMIT'
+                WHEN age > (2^31-1 - current_setting('xid_stop_limit')::int ) THEN 'OVER STOP LIMIT'
+                WHEN age < 0 THEN 'OVER WRAPAROUND'
+        END
+FROM cluster
+ORDER BY datname, gp_segment_id
+'''
 get_temp_schema_sql = '''
 select nspname from pg_namespace where nspname like 'pg_temp%' except select 'pg_temp_' || sess_id::varchar from pg_stat_activity
 union
@@ -317,6 +366,21 @@ and COALESCE(last_autoanalyze,'2022-01-01',last_analyze) < now() - interval '{1}
 order by schemaname, relname
 '''.format(TABLE_MIN_TUPLES_FOR_CHECK, WITHOUT_ANALYZE_DAYS)
 get_heap_bloat_sql = 'select * from gp_toolkit.gp_bloat_diag where bdiexppages*100/bdirelpages <={0} order by bdiexppages/bdirelpages desc limit 20'.format(TABLE_BLOAT_PERCENT)
+# Indexes left in an unusable state (indisvalid=false from a failed CREATE INDEX
+# CONCURRENTLY, or indisready=false mid-build). The planner silently ignores
+# them, so queries degrade with no error. This is per-database (pg_index is not
+# shared) and cheap. Catalog namespaces are excluded.
+get_invalid_index_sql = '''
+select n.nspname as schema, ic.relname as index_name, tc.relname as table_name,
+       i.indisvalid, i.indisready
+from pg_index i
+join pg_class ic on ic.oid = i.indexrelid
+join pg_class tc on tc.oid = i.indrelid
+join pg_namespace n on n.oid = ic.relnamespace
+where (not i.indisvalid or not i.indisready)
+  and n.nspname not in ('pg_catalog','information_schema')
+order by n.nspname, tc.relname, ic.relname
+'''
 get_legacy2_ao_bloat_sql = '''
 select * from (
 SELECT 
@@ -699,6 +763,30 @@ def standby_check(dbconn, pg_version, rpt_format):
     standby_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
     return (check_item,check_result,standby_check_output)
 
+def seg_role_balance_check(dbconn, rpt_format):
+    check_item = 'Segment Role Balance'
+    check_result = 'OK'
+    check_result_detail = ''
+    cursor = execSQL(dbconn, get_seg_role_balance_sql)
+    role_balance_result = cursor.fetchall()
+    column_names_list = [row[0] for row in cursor.description]
+    role_balance_table = PrettyTable(column_names_list)
+    if cursor.rowcount > 0:
+        check_result = 'NOT OK'
+        for row in role_balance_result:
+            role_balance_table.add_row(row)
+    if rpt_format == 'text':
+        check_result_detail = role_balance_table.get_string()
+    if rpt_format == 'html':
+        check_result_detail = role_balance_table.get_html_string(attributes={
+            'width': '60%',
+            'align': 'left',
+            'BORDERCOLOR': '#330000',
+            'border': '2',
+        })
+    seg_role_balance_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
+    return (check_item, check_result, seg_role_balance_check_output)
+
 def guc_check(dbconn,rpt_format):
     check_item = 'Database Parameters'
     check_result = 'OK'
@@ -962,6 +1050,30 @@ def pg_activity_check(dbconn, pg_version, rpt_format):
     pg_activity_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
     return (check_item, check_result, pg_activity_check_output)
 
+def idle_in_transaction_check(dbconn, rpt_format):
+    check_item = 'Long Idle In Transaction Sessions'
+    check_result = 'OK'
+    check_result_detail = ''
+    cursor = execSQL(dbconn, get_idle_in_transaction_sql)
+    idle_in_transaction_result = cursor.fetchall()
+    column_names_list = [row[0] for row in cursor.description]
+    idle_in_transaction_table = PrettyTable(column_names_list)
+    if cursor.rowcount > 0:
+        check_result = 'NOT OK'
+        for row in idle_in_transaction_result:
+            idle_in_transaction_table.add_row(row)
+    if rpt_format == 'text':
+        check_result_detail = idle_in_transaction_table.get_string()
+    if rpt_format == 'html':
+        check_result_detail = idle_in_transaction_table.get_html_string(attributes={
+            'width': '60%',
+            'align': 'left',
+            'BORDERCOLOR': '#330000',
+            'border': '2',
+        })
+    idle_in_transaction_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
+    return (check_item, check_result, idle_in_transaction_check_output)
+
 def pg_locks_check(dbconn, pg_version, rpt_format):
     check_item = 'Current Database Locks'
     check_result = 'OK'
@@ -1089,6 +1201,30 @@ def db_age_check(dbconn, rpt_format):
     db_age_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
     return (check_item, check_result, db_age_check_output)
 
+def db_mxid_age_check(dbconn, rpt_format):
+    check_item = 'Database Multixact Age'
+    check_result = 'OK'
+    check_result_detail = ''
+    cursor = execSQL(dbconn, get_db_mxid_age_sql)
+    mxid_age_result = cursor.fetchall()
+    column_names_list = [row[0] for row in cursor.description]
+    mxid_age_table = PrettyTable(column_names_list)
+    for row in mxid_age_result:
+        mxid_age_table.add_row(row)
+        if row[-1] != 'BELOW WARN LIMIT':
+            check_result = 'NOT OK'
+    if rpt_format == 'text':
+        check_result_detail = mxid_age_table.get_string()
+    if rpt_format == 'html':
+        check_result_detail = mxid_age_table.get_html_string(attributes={
+            'width': '60%',
+            'align': 'left',
+            'BORDERCOLOR': '#330000',
+            'border': '2',
+        })
+    db_mxid_age_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
+    return (check_item, check_result, db_mxid_age_check_output)
+
 def temp_schema_check(db_list,rpt_format):
     check_item = 'Temp Schema'
     check_result = 'OK'
@@ -1143,7 +1279,34 @@ def stale_stats_check(db_list,rpt_format):
     stale_stats_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
     return (check_item, check_result, stale_stats_check_output)
 
-##################  Main function ################## 
+def invalid_index_check(db_list, rpt_format):
+    check_item = 'Invalid Indexes'
+    check_result = 'OK'
+    check_result_detail = ''
+    for db in db_list:
+        dbconn = pgdb.connect(database=db, host='{0}:{1}'.format(MASTER_HOST_NAME,MASTER_PORT), user='gpadmin')
+        cursor = execSQL(dbconn, get_invalid_index_sql)
+        invalid_index_result = cursor.fetchall()
+        column_names_list = [row[0] for row in cursor.description]
+        invalid_index_table = PrettyTable(column_names_list)
+        if cursor.rowcount > 0:
+            check_result = 'NOT OK'
+            for row in invalid_index_result:
+                invalid_index_table.add_row(row)
+        if rpt_format == 'text':
+            check_result_detail += '\nDatabase: ' + db + '\n' + invalid_index_table.get_string() + '\n'
+        if rpt_format == 'html':
+            check_result_detail += '<div style="clear:both"><br><b><li>Database: ' + db + '</li></b><div style="clear:both">\n' + invalid_index_table.get_html_string(attributes={
+            'width': '60%',
+            'align': 'left',
+            'BORDERCOLOR': '#330000',
+            'border': '2',
+        }) + '\n<br>'
+        dbconn.close()
+    invalid_index_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
+    return (check_item, check_result, invalid_index_check_output)
+
+##################  Main function ##################
 def synxdb_health_check(configs):
     #### Connect DB and get hosts list in cluster
     rpt_format = configs['report_format']
@@ -1200,6 +1363,11 @@ def synxdb_health_check(configs):
         standby_check_output = standby_check(dbconn, pg_version,rpt_format)
         report_output_list.append(standby_check_output)
         print('Done')
+    if configs['seg_role_balance_check']['enabled'] and pg_version != 'legacy3':
+        print('Checking segment role balance...')
+        seg_role_balance_check_output = seg_role_balance_check(dbconn,rpt_format)
+        report_output_list.append(seg_role_balance_check_output)
+        print('Done')
     if configs['guc_check']['enabled']:
         print('Checking GUCs...')
         guc_check_output = guc_check(dbconn,rpt_format)
@@ -1228,6 +1396,11 @@ def synxdb_health_check(configs):
         print('Checking current long running queries...')
         pg_activity_check_output = pg_activity_check(dbconn, pg_version,rpt_format)
         report_output_list.append(pg_activity_check_output)
+        print('Done')
+    if configs['idle_in_transaction_check']['enabled']:
+        print('Checking long idle in transaction sessions...')
+        idle_in_transaction_check_output = idle_in_transaction_check(dbconn, rpt_format)
+        report_output_list.append(idle_in_transaction_check_output)
         print('Done')
     if configs['pg_locks_check']['enabled']:
         print('Checking current locks...')
@@ -1269,10 +1442,20 @@ def synxdb_health_check(configs):
         stale_stats_check_output = stale_stats_check(db_list,rpt_format)
         report_output_list.append(stale_stats_check_output)
         print('Done')
+    if configs['invalid_index_check']['enabled']:
+        print('Checking invalid indexes...')
+        invalid_index_check_output = invalid_index_check(db_list,rpt_format)
+        report_output_list.append(invalid_index_check_output)
+        print('Done')
     if configs['db_age_check']['enabled'] and pg_version != 'legacy3':
         print('Checking databases age...')
         db_age_check_output = db_age_check(dbconn,rpt_format)
         report_output_list.append(db_age_check_output)
+        print('Done')
+    if configs['db_mxid_age_check']['enabled'] and pg_version != 'legacy3':
+        print('Checking databases multixact age...')
+        db_mxid_age_check_output = db_mxid_age_check(dbconn,rpt_format)
+        report_output_list.append(db_mxid_age_check_output)
         print('Done')
 #    if configs['table_age_check']['enabled'] and pg_version != 'legacy3':
 #        print('Checking tables age...')
