@@ -141,9 +141,10 @@ get_diskspace_sql = '''
 SELECT distinct dfhostname, dfdevice, (dfspace/1024/1024)::decimal(18,2) as "space_avail_gb" FROM gp_toolkit.gp_disk_free order by dfhostname
 '''
 create_mpp_table_size_view_sql = '''
-create or replace view public.mpp_table_size 
+create or replace view public.mpp_table_size
 as select c.oid,n.nspname as schemaname,c.relname as tablename,
-(c.relpages * 32/1024) as size_mb
+(case when c.relpages > 0 then c.relpages * 32/1024
+      else (pg_relation_size(c.oid)/1024/1024)::int end) as size_mb
 from pg_class c join pg_namespace n on c.relnamespace=n.oid
 where c.relkind='r'
 '''
@@ -157,7 +158,20 @@ left join
 where a.schemaname not like 'pg_%' order by  3 desc
 '''
 get_table_size_sql = '''
-select schemaname,tablename,size_mb from public.mpp_table_size where size_mb > 0 order by 3 desc limit 100
+select schemaname,tablename,size_mb from (
+  select
+    coalesce(rc.nspname, v.schemaname) as schemaname,
+    coalesce(rc.relname, v.tablename)  as tablename,
+    sum(v.size_mb) as size_mb
+  from public.mpp_table_size v
+  left join lateral (
+    select n2.nspname, c2.relname
+    from pg_class c2 join pg_namespace n2 on c2.relnamespace=n2.oid
+    where c2.oid = pg_partition_root(v.oid)
+  ) rc on true
+  group by 1,2
+) t
+where schemaname not like 'pg\_%' and size_mb > 0 order by 3 desc limit 100
 '''
 create_data_skew_fn_sql = """
 CREATE OR REPLACE FUNCTION public.fn_get_skew(out schema_name      varchar,
