@@ -11,6 +11,9 @@ seg_config_check:
 os_version_check:
   enabled: true
 
+os_kernel_check:
+  enabled: true
+
 cpu_cores_check:
   enabled: true
 
@@ -21,6 +24,9 @@ diskspace_check:
   enabled: true
 
 host_load_check:
+  enabled: true
+
+clock_sync_check:
   enabled: true
 
 segments_status_check:

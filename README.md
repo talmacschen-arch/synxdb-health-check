@@ -64,6 +64,10 @@ The following parameters in `synxdb_health_check.py` can be configured if needed
 |TABLE_SKEW_PERCENT|Skew threshold for the **max-min gap** metric used by the AO/AOCS file-size based skew check, i.e. `100*(max_seg-min_seg)/max_seg`. Tables above this are reported. (Default: 20%) |
 |TABLE_SKEW_MIN_SIZE_GB|Minimum on-disk size (GB) for a table to be reported by the file-size based skew check (CBDB AO tables). (Default: 1GB) |
 |TABLE_SKEW_CV_PERCENT|Skew threshold for the **coefficient of variation (CV)** metric used by the PAX skew check (`gp_toolkit.gp_skew_coefficient`, `stddev/avg` of per-segment row counts, on a percentage scale). This is a different metric from `TABLE_SKEW_PERCENT`'s max-min gap, so it has its own threshold, aligned with Greenplum's guidance that tables with more than 10% skew should have their distribution policy re-evaluated. (Default: 10%) |
+|OS_OVERCOMMIT_MEMORY_EXPECTED|Expected `vm.overcommit_memory` value for `os_kernel_check`. Exposed as a knob because some resource-group deployments intentionally differ from Greenplum's recommended value. (Default: 2)|
+|OS_ULIMIT_NOFILE_MIN|Minimum acceptable `ulimit -n` (open files) per host for `os_kernel_check`. (Default: 524288)|
+|OS_ULIMIT_NPROC_MIN|Minimum acceptable `ulimit -u` (max user processes) per host for `os_kernel_check`. (Default: 131072)|
+|CLOCK_SKEW_MAX_SEC|Maximum tolerated wall-clock skew (seconds) between hosts for `clock_sync_check`. Kept loose so the latency of sequential ssh calls is not mistaken for real skew. (Default: 5s)|
 
 
 ## Supported Check Items
@@ -73,10 +77,12 @@ The following parameters in `synxdb_health_check.py` can be configured if needed
 |db_version_check|Check database version |
 |seg_config_check| Get `gp_segment_configuration`|
 |os_version_check|Check OS version for each host in cluster|
+|os_kernel_check|Check GP-recommended OS kernel settings on each host: `vm.overcommit_memory` (expected `OS_OVERCOMMIT_MEMORY_EXPECTED`), Transparent Huge Pages disabled (`[never]`), `RemoveIPC=no`, and `ulimit` open-files / max-processes above `OS_ULIMIT_NOFILE_MIN` / `OS_ULIMIT_NPROC_MIN`. Any host failing any item makes the result `NOT OK`. Probed over the existing `ssh gpadmin@host` channel.|
 |cpu_cores_check|Check CPU cores for each host in cluster|
 |memory_size_check| Check RAM size for each host in cluster|
 |diskspace_check| Check free diskspace for database data directory|
 |host_load_check| Get `uptime` output for each host|
+|clock_sync_check|Check host clock synchronization: each host's NTP sync state (`timedatectl` `NTPSynchronized`) and the wall-clock skew across hosts. The result is `NOT OK` if any host is not NTP-synchronized or the max-min skew exceeds `CLOCK_SKEW_MAX_SEC`. Clock skew can disrupt FTS and replication. Probed over the existing `ssh gpadmin@host` channel.|
 |segments_status_check|Check if there is any segments down. |
 |standby_status_check|Check if the standby master is sync or not. |
 |seg_role_balance_check|Check `gp_segment_configuration` for segments whose current `role` differs from `preferred_role` (an FTS failover that never rebalanced, leaving one host with a double share of primaries) or, for data segments (`content >= 0`), whose `mode` is not `s` (still resyncing). The result is `NOT OK` if any such segment exists. The coordinator's own sync state is left to `standby_status_check`, so `mode` is only judged for `content >= 0` to avoid a false positive on mirrorless clusters.|
@@ -101,6 +107,7 @@ The following parameters in `synxdb_health_check.py` can be configured if needed
 
 ## Changelog
 
+- **Add OS kernel-parameter and host clock-sync checks.** `os_kernel_check` verifies the GP-recommended OS settings on each host — `vm.overcommit_memory` (expected value configurable via `OS_OVERCOMMIT_MEMORY_EXPECTED`), Transparent Huge Pages disabled, `RemoveIPC=no`, and `ulimit` open-files / max-processes minimums — since node drift on these silently degrades the cluster. `clock_sync_check` verifies each host is NTP-synchronized and that the wall-clock skew across hosts stays within `CLOCK_SKEW_MAX_SEC`, because clock skew disrupts FTS and replication. Both reuse the existing `ssh gpadmin@host` channel.
 - **Scope `pg_activity_check` to actively-running client queries.** The long-running query check now reports only backends with `state = 'active'` and `backend_type = 'client backend'`. Background and replication connections — such as the standby WAL sender's permanent `START_REPLICATION` — and idle client sessions are no longer counted as long-running queries. `idle in transaction` sessions remain covered by `idle_in_transaction_check`.
 - **Report long-running queries and long-held locks by total elapsed time.** `pg_activity_check` and `pg_locks_check` now measure elapsed time with `extract(epoch from now()-query_start)`, so a query running longer than `LONG_RUNNING_QUERY_THRESHOLD` (default 1hr) or a lock held longer than `LOCK_HOLD_TIME` (default 10min) is reported as intended, and the reported `duration_sec` / `lock_duration_sec` is the whole elapsed seconds.
 - **Add four health-check items based on GP7 inspection best practices.** `seg_role_balance_check` flags segments whose current `role` differs from `preferred_role` (unrebalanced FTS failover) or data segments still resyncing (`mode <> 's'`). `db_mxid_age_check` checks multixact wraparound age (`mxid_age(datminmxid)`), an independent risk line from the XID age already covered by `db_age_check`. `idle_in_transaction_check` reports sessions stuck in `idle in transaction` longer than `IDLE_IN_TRANSACTION_THRESHOLD` (holding back the global xmin). `invalid_index_check` reports indexes with `indisvalid = false` / `indisready = false`, which the planner silently ignores. All four are pure SQL with no external dependencies.
