@@ -35,6 +35,7 @@ TABLE_BLOAT_PERCENT=20
 TABLE_UPDATE_COUNT_3X=50000
 TABLE_SKEW_PERCENT=20
 TABLE_SKEW_MIN_SIZE_GB=1
+TABLE_SKEW_CV_PERCENT=10
 
 ##################  SQL queries ################## 
 get_db_version_sql = 'select version()'
@@ -834,7 +835,11 @@ def data_skew_check(pg_version,db_list,rpt_format):
                 if skew_row is None or skew_row[0] is None:
                     continue
                 skew_coeff = round(skew_row[0], 2)
-                if skew_coeff > TABLE_SKEW_PERCENT:
+                # skccoeff is the coefficient of variation (stddev/avg) of per-segment
+                # row counts, on a percentage scale. It is a different metric from the
+                # max-min gap used for AO tables, so it has its own threshold aligned
+                # with Greenplum's guidance (>10% skew -> re-evaluate distribution).
+                if skew_coeff > TABLE_SKEW_CV_PERCENT:
                     check_result = 'NOT OK'
                     check_result_table.add_row([schema_name, table_name, 'pax', 'skew_coeff%', skew_coeff])
             check_result_table.sortby = "value"
