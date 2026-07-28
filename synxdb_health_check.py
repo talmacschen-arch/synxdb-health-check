@@ -709,7 +709,7 @@ def clock_sync_check(hosts_list, rpt_format):
             'align': 'left',
             'BORDERCOLOR': '#330000',
             'border': '2',
-        }) + '<br>' + skew_note
+        }) + '<p style="clear:both">' + skew_note + '</p>'
     clock_sync_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
     return (check_item, check_result, clock_sync_check_output)
 
