@@ -104,37 +104,37 @@ get_resource_manager_gpconfig_cmd = 'gpconfig -s gp_resource_manager'
 check_standby_sql_pg9 = 'SELECT pid, state FROM pg_stat_replication'
 check_standby_sql_pg8 = 'SELECT procpid, state FROM pg_stat_replication'
 get_pg_activity_sql_pg14 = '''
-select datname,pid,sess_id,usename,application_name,client_addr,client_hostname,backend_start,xact_start,query_start,date_part('second', now()-query_start) as duration_sec,wait_event,state,query,wait_event_type,rsgname 
+select datname,pid,sess_id,usename,application_name,client_addr,client_hostname,backend_start,xact_start,query_start,extract(epoch from now()-query_start)::int as duration_sec,wait_event,state,query,wait_event_type,rsgname 
 from pg_stat_activity
-where date_part('second', now()-query_start) > {0}
+where extract(epoch from now()-query_start) > {0}
 '''.format(LONG_RUNNING_QUERY_THRESHOLD)
 get_pg_activity_sql_pg9 = '''
-select datname,pid,sess_id,usename,application_name,client_addr,client_hostname,backend_start,xact_start,query_start,date_part('second', now()-query_start) as duration_sec,waiting,state,query,waiting_reason,rsgname,rsgqueueduration 
+select datname,pid,sess_id,usename,application_name,client_addr,client_hostname,backend_start,xact_start,query_start,extract(epoch from now()-query_start)::int as duration_sec,waiting,state,query,waiting_reason,rsgname,rsgqueueduration 
 from pg_stat_activity
-where date_part('second', now()-query_start) > {0}
+where extract(epoch from now()-query_start) > {0}
 '''.format(LONG_RUNNING_QUERY_THRESHOLD)
 get_pg_activity_sql_pg8 = '''
-select datname,procpid,sess_id,usename,application_name,client_addr,backend_start,xact_start,query_start,date_part('second', now()-query_start) as duration_sec,waiting,current_query,waiting_reason,rsgname,rsgqueueduration 
+select datname,procpid,sess_id,usename,application_name,client_addr,backend_start,xact_start,query_start,extract(epoch from now()-query_start)::int as duration_sec,waiting,current_query,waiting_reason,rsgname,rsgqueueduration 
 from pg_stat_activity
-where date_part('second', now()-query_start) > {0}
+where extract(epoch from now()-query_start) > {0}
 '''.format(LONG_RUNNING_QUERY_THRESHOLD)
 get_pg_locks_sql_pg9 = '''
-select a.gp_segment_id, a.pid, a.mode, a.mppsessionid, c.nspname,b.relname, date_part('second', now()-d.query_start) as lock_duration_sec, d.query as query_hold_lock
+select a.gp_segment_id, a.pid, a.mode, a.mppsessionid, c.nspname,b.relname, extract(epoch from now()-d.query_start)::int as lock_duration_sec, d.query as query_hold_lock
 from pg_locks a, pg_class b, pg_namespace c, pg_stat_activity d
 where a.relation=b.oid and b.relnamespace=c.oid
 and a.locktype='relation' and granted = 't' 
 and a.mppsessionid = d.sess_id
-and date_part('second', now()-d.query_start) > {0}
+and extract(epoch from now()-d.query_start) > {0}
 and relation in (select relation from pg_locks where granted = 'f')
 order by gp_segment_id
 '''.format(LOCK_HOLD_TIME)
 get_pg_locks_sql_pg8 = '''
-select a.gp_segment_id, a.pid, a.mode, a.mppsessionid, c.nspname,b.relname, date_part('second', now()-d.query_start) as lock_duration_sec, d.current_query as query_hold_lock
+select a.gp_segment_id, a.pid, a.mode, a.mppsessionid, c.nspname,b.relname, extract(epoch from now()-d.query_start)::int as lock_duration_sec, d.current_query as query_hold_lock
 from pg_locks a, pg_class b, pg_namespace c, pg_stat_activity d
 where a.relation=b.oid and b.relnamespace=c.oid
 and a.locktype='relation' and granted = 't' 
 and a.mppsessionid = d.sess_id
-and date_part('second', now()-d.query_start) > {0}
+and extract(epoch from now()-d.query_start) > {0}
 and relation in (select relation from pg_locks where granted = 'f')
 order by gp_segment_id
 '''.format(LOCK_HOLD_TIME)
