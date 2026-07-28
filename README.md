@@ -92,3 +92,8 @@ The following parameters in `synxdb_health_check.py` can be configured if needed
 |pg_activity_check|Check current running queries in database. The check result will be `NOT OK` if any query runs > 1hr.|
 |pg_locks_check| Check if there is any session holding the lock > 10mins.|
 |stale_stats_check|Get a list of tables which have not been analyzed.|
+
+
+## Changelog
+
+- **Fix text report summary table rendering.** In the `text` (`.rpt`) report, the *Database Check Summary* table previously rendered with empty data cells (`|      |`) while the header and all detail tables were fine. The ANSI color-stripping step used a greedy pattern (`\033\[.*m`) that, on a colored summary row, deleted the cell text and column separators between the first and last escape code. The pattern is now anchored to the escape sequence (`\033\[[0-9;]*m`) so only the color codes are stripped.
