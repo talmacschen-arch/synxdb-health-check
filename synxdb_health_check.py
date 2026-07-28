@@ -1360,7 +1360,11 @@ def synxdb_health_check(configs):
     if rpt_format == 'html':
         report_suffix = '.html'
     report_file = report_path + '/synxdb-health-check-' + time.strftime("%Y-%m-%d", time.localtime()) + report_suffix
-    report_output_without_color_flag  = re.sub(r'\033\[.*m','',report_output)
+    # Strip ANSI color codes only. The pattern must be anchored to the escape
+    # sequence ([0-9;]*m); a greedy '.*m' would match from the first escape to
+    # the last 'm' on a line and delete the cell text and column separators in
+    # between, collapsing colored summary rows to empty cells.
+    report_output_without_color_flag  = re.sub(r'\033\[[0-9;]*m','',report_output)
     f = codecs.open(report_file, 'w', 'utf-8')
     f.write(report_output_without_color_flag)
     f.close()
