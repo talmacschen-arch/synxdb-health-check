@@ -117,9 +117,11 @@ get_resource_manager_gpconfig_cmd = 'gpconfig -s gp_resource_manager'
 check_standby_sql_pg9 = 'SELECT pid, state FROM pg_stat_replication'
 check_standby_sql_pg8 = 'SELECT procpid, state FROM pg_stat_replication'
 get_pg_activity_sql_pg14 = '''
-select datname,pid,sess_id,usename,application_name,client_addr,client_hostname,backend_start,xact_start,query_start,extract(epoch from now()-query_start)::int as duration_sec,wait_event,state,query,wait_event_type,rsgname 
+select datname,pid,sess_id,usename,application_name,client_addr,client_hostname,backend_start,xact_start,query_start,extract(epoch from now()-query_start)::int as duration_sec,wait_event,state,query,wait_event_type,rsgname
 from pg_stat_activity
-where extract(epoch from now()-query_start) > {0}
+where state = 'active'
+  and backend_type = 'client backend'
+  and extract(epoch from now()-query_start) > {0}
 '''.format(LONG_RUNNING_QUERY_THRESHOLD)
 get_pg_activity_sql_pg9 = '''
 select datname,pid,sess_id,usename,application_name,client_addr,client_hostname,backend_start,xact_start,query_start,extract(epoch from now()-query_start)::int as duration_sec,waiting,state,query,waiting_reason,rsgname,rsgqueueduration 
