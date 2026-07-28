@@ -30,6 +30,15 @@ MASTER_PORT=5432
 LONG_RUNNING_QUERY_THRESHOLD=3600
 IDLE_IN_TRANSACTION_THRESHOLD=600
 LOCK_HOLD_TIME=600
+# OS kernel compliance (os_kernel_check). Expected values follow the Greenplum
+# recommended OS settings. vm.overcommit_memory is exposed as a knob because
+# some resource-group deployments intentionally differ from the default of 2.
+OS_OVERCOMMIT_MEMORY_EXPECTED=2
+OS_ULIMIT_NOFILE_MIN=524288
+OS_ULIMIT_NPROC_MIN=131072
+# Max tolerated wall-clock skew (seconds) between hosts (clock_sync_check). Kept
+# loose so the latency of sequential ssh calls is not mistaken for real skew.
+CLOCK_SKEW_MAX_SEC=5
 WITHOUT_ANALYZE_DAYS=7
 TABLE_MIN_TUPLES_FOR_CHECK=100000
 TABLE_BLOAT_PERCENT=20
@@ -612,7 +621,97 @@ def os_version_check(hosts_list,rpt_format):
             'border': '2',
         })
     os_version_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
-    return (check_item, check_result, os_version_check_output)   
+    return (check_item, check_result, os_version_check_output)
+
+def _ulimit_meets(value, minimum):
+    # ulimit may report 'unlimited', which always satisfies a minimum.
+    if value == 'unlimited':
+        return True
+    try:
+        return int(value) >= minimum
+    except ValueError:
+        return False
+
+def os_kernel_check(hosts_list, rpt_format):
+    check_item = 'OS Kernel Parameters'
+    check_result = 'OK'
+    check_result_detail = ''
+    check_result_table = PrettyTable(["Host","vm.overcommit_memory","THP","RemoveIPC","ulimit nofile","ulimit nproc","Compliant"])
+    for host in hosts_list:
+        kernel_cmd = 'ssh gpadmin@%s "sysctl -n vm.overcommit_memory; cat /sys/kernel/mm/transparent_hugepage/enabled; systemctl show -p RemoveIPC --value systemd-logind; ulimit -n; ulimit -u"' % (host)
+        kernel_output = _execute_shell_command(kernel_cmd)
+        lines = kernel_output.splitlines()
+        if len(lines) < 5:
+            check_result = 'NOT OK'
+            check_result_table.add_row([host,'ERROR','ERROR','ERROR','ERROR','ERROR','NO'])
+            continue
+        overcommit = lines[0].strip()
+        # THP: 'always madvise [never]' -> the value in [] is the active one.
+        thp = 'disabled' if '[never]' in lines[1] else 'enabled'
+        removeipc = lines[2].strip()
+        nofile = lines[3].strip()
+        nproc = lines[4].strip()
+        host_ok = (overcommit == str(OS_OVERCOMMIT_MEMORY_EXPECTED)
+                   and thp == 'disabled'
+                   and removeipc == 'no'
+                   and _ulimit_meets(nofile, OS_ULIMIT_NOFILE_MIN)
+                   and _ulimit_meets(nproc, OS_ULIMIT_NPROC_MIN))
+        if not host_ok:
+            check_result = 'NOT OK'
+        check_result_table.add_row([host,overcommit,thp,removeipc,nofile,nproc,'YES' if host_ok else 'NO'])
+    if rpt_format == 'text':
+        check_result_detail = check_result_table.get_string()
+    if rpt_format == 'html':
+        check_result_detail = check_result_table.get_html_string(attributes={
+            'width': '60%',
+            'align': 'left',
+            'BORDERCOLOR': '#330000',
+            'border': '2',
+        })
+    os_kernel_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
+    return (check_item, check_result, os_kernel_check_output)
+
+def clock_sync_check(hosts_list, rpt_format):
+    check_item = 'Host Clock Sync'
+    check_result = 'OK'
+    check_result_detail = ''
+    check_result_table = PrettyTable(["Host","NTP Synchronized","Epoch (s)"])
+    epochs = []
+    table_rows = []
+    for host in hosts_list:
+        clock_cmd = 'ssh gpadmin@%s "timedatectl show -p NTPSynchronized --value; date +%%s"' % (host)
+        clock_output = _execute_shell_command(clock_cmd)
+        lines = clock_output.splitlines()
+        if len(lines) < 2:
+            check_result = 'NOT OK'
+            table_rows.append([host,'ERROR','ERROR'])
+            continue
+        ntp = lines[0].strip()
+        epoch_str = lines[1].strip()
+        if ntp == 'no':
+            check_result = 'NOT OK'
+        try:
+            epochs.append(int(epoch_str))
+        except ValueError:
+            check_result = 'NOT OK'
+        table_rows.append([host,ntp,epoch_str])
+    skew = (max(epochs) - min(epochs)) if len(epochs) >= 2 else 0
+    if skew > CLOCK_SKEW_MAX_SEC:
+        check_result = 'NOT OK'
+    for row in table_rows:
+        check_result_table.add_row(row)
+    skew_note = 'Max clock skew across hosts: %ss (threshold %ss)' % (skew, CLOCK_SKEW_MAX_SEC)
+    if rpt_format == 'text':
+        check_result_detail = check_result_table.get_string() + '\n\n' + skew_note
+    if rpt_format == 'html':
+        check_result_detail = check_result_table.get_html_string(attributes={
+            'width': '60%',
+            'align': 'left',
+            'BORDERCOLOR': '#330000',
+            'border': '2',
+        }) + '<br>' + skew_note
+    clock_sync_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
+    return (check_item, check_result, clock_sync_check_output)
 
 def cpu_cores_check(hosts_list,rpt_format):
     check_item = 'CPU Cores'
@@ -1335,6 +1434,11 @@ def synxdb_health_check(configs):
         os_version_check_output = os_version_check(hosts_list,rpt_format)
         report_output_list.append(os_version_check_output)
         print('Done')
+    if configs['os_kernel_check']['enabled']:
+        print('Checking OS kernel parameters...')
+        os_kernel_check_output = os_kernel_check(hosts_list,rpt_format)
+        report_output_list.append(os_kernel_check_output)
+        print('Done')
     if configs['cpu_cores_check']['enabled']:
         print('Checking CPU cores...')
         cpu_cores_check_output = cpu_cores_check(hosts_list,rpt_format)
@@ -1354,6 +1458,11 @@ def synxdb_health_check(configs):
         print('Checking host load...')
         host_load_check_output = host_load_check(hosts_list,rpt_format)
         report_output_list.append(host_load_check_output)
+        print('Done')
+    if configs['clock_sync_check']['enabled']:
+        print('Checking host clock sync...')
+        clock_sync_check_output = clock_sync_check(hosts_list,rpt_format)
+        report_output_list.append(clock_sync_check_output)
         print('Done')
     if configs['segments_status_check']['enabled'] and pg_version != 'legacy3':
         print('Checking segment status...')
