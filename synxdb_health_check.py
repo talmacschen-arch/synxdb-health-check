@@ -183,8 +183,8 @@ SELECT distinct dfhostname, dfdevice, (dfspace/1024/1024)::decimal(18,2) as "spa
 create_mpp_table_size_view_sql = '''
 create or replace view public.mpp_table_size
 as select c.oid,n.nspname as schemaname,c.relname as tablename,
-(case when c.relpages > 0 then c.relpages * 32/1024
-      else (pg_relation_size(c.oid)/1024/1024)::int end) as size_mb
+(case when c.relpages > 0 then c.relpages::bigint * 32/1024
+      else (pg_relation_size(c.oid)/1024/1024) end)::bigint as size_mb
 from pg_class c join pg_namespace n on c.relnamespace=n.oid
 where c.relkind='r'
 '''
