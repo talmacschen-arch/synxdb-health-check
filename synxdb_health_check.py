@@ -376,7 +376,7 @@ and COALESCE(last_analyze,'2022-01-01',last_analyze) < now() - interval '{1} day
 and COALESCE(last_autoanalyze,'2022-01-01',last_analyze) < now() - interval '{1} day'
 order by schemaname, relname
 '''.format(TABLE_MIN_TUPLES_FOR_CHECK, WITHOUT_ANALYZE_DAYS)
-get_heap_bloat_sql = 'select * from gp_toolkit.gp_bloat_diag where bdiexppages*100/bdirelpages <={0} order by bdiexppages/bdirelpages desc limit 20'.format(TABLE_BLOAT_PERCENT)
+get_heap_bloat_sql = 'select * from gp_toolkit.gp_bloat_diag where bdiexppages*100/nullif(bdirelpages,0) <={0} order by bdiexppages/nullif(bdirelpages,0) desc limit 20'.format(TABLE_BLOAT_PERCENT)
 # Indexes left in an unusable state (indisvalid=false from a failed CREATE INDEX
 # CONCURRENTLY, or indisready=false mid-build). The planner silently ignores
 # them, so queries degrade with no error. This is per-database (pg_index is not
