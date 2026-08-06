@@ -15,12 +15,23 @@ import re
 import argparse
 from datetime import datetime
 from prettytable import PrettyTable
-try: 
+try:
     from pygresql import pgdb
 except:
     pass
 try:
     import pgdb
+except:
+    pass
+# PyGreSQL raises the low-level pg.* exception hierarchy (e.g. pg.ProgrammingError)
+# straight out of cursor.execute(), so we import pg to catch it. Kept optional the
+# same way as pgdb above so a missing module never breaks import.
+try:
+    from pygresql import pg
+except:
+    pass
+try:
+    import pg
 except:
     pass
 
@@ -181,7 +192,8 @@ get_diskspace_sql = '''
 SELECT distinct dfhostname, dfdevice, (dfspace/1024/1024)::decimal(18,2) as "space_avail_gb" FROM gp_toolkit.gp_disk_free order by dfhostname
 '''
 create_mpp_table_size_view_sql = '''
-create or replace view public.mpp_table_size
+drop view if exists public.mpp_table_size;
+create view public.mpp_table_size
 as select c.oid,n.nspname as schemaname,c.relname as tablename,
 (case when c.relpages > 0 then c.relpages::bigint * 32/1024
       else (pg_relation_size(c.oid)/1024/1024) end)::bigint as size_mb
@@ -392,23 +404,30 @@ where (not i.indisvalid or not i.indisready)
   and n.nspname not in ('pg_catalog','information_schema')
 order by n.nspname, tc.relname, ic.relname
 '''
-get_legacy2_ao_bloat_sql = '''
-select * from (
-SELECT 
-c.oid, 
-n.nspname AS schema_name, 
-c.relname AS table_name, 
-c.reltuples::bigint AS num_rows, 
-(SELECT max(percent_hidden) FROM gp_toolkit.__gp_aovisimap_compaction_info(c.oid)) as percent_hidden, 
-(SELECT sum(total_tupcount) FROM gp_toolkit.__gp_aovisimap_compaction_info(c.oid)) as total_tupcount, 
-(SELECT sum(hidden_tupcount) FROM gp_toolkit.__gp_aovisimap_compaction_info(c.oid))  as hidden_tupcount 
-FROM pg_appendonly a 
-JOIN pg_class c ON c.oid=a.relid 
-JOIN pg_namespace n ON c.relnamespace=n.oid 
+# AO/AOCO bloat is read from gp_toolkit.__gp_aovisimap_compaction_info(oid).
+# We must NOT compute it for every table inside one big query: that function
+# opens each relation's visimap, and on a live cluster a concurrent
+# DELETE/VACUUM/DROP on ANY single AO table makes the whole statement abort
+# with "could not open relation with OID ...", crashing the entire health
+# check. Instead we list the candidate tables first, then probe each one in
+# its own statement (see ao_table_bloat_check) so a racing DML only skips that
+# one table.
+get_legacy2_ao_table_list_sql = '''
+SELECT c.oid,
+       n.nspname AS schema_name,
+       c.relname AS table_name,
+       c.reltuples::bigint AS num_rows
+FROM pg_appendonly a
+JOIN pg_class c ON c.oid=a.relid
+JOIN pg_namespace n ON c.relnamespace=n.oid
 where c.reltuples > {0}
-) as ao_bloat
-where percent_hidden > {1}
-'''.format(TABLE_MIN_TUPLES_FOR_CHECK, TABLE_BLOAT_PERCENT)
+'''.format(TABLE_MIN_TUPLES_FOR_CHECK)
+get_legacy2_ao_bloat_info_sql = '''
+SELECT max(percent_hidden) AS percent_hidden,
+       sum(total_tupcount) AS total_tupcount,
+       sum(hidden_tupcount) AS hidden_tupcount
+FROM gp_toolkit.__gp_aovisimap_compaction_info(%s)
+'''
 get_ao_table_list_sql = '''
 select n.nspname as schemaname,c.relname as tablename ,ap.segrelid::regclass as ao_table from pg_class c join pg_namespace n on c.relnamespace=n.oid join pg_appendonly ap on c.oid=ap.relid where c.relkind='r' and c.reltuples > {0} and n.nspname  not like 'pg_%'
 '''.format(TABLE_MIN_TUPLES_FOR_CHECK)
@@ -475,11 +494,22 @@ order by n.nspname, c.relname
 
 get_skew_coefficient_sql = 'select (gp_toolkit.gp_skew_coefficient(%s)).skccoeff'
 
-################## Common functions ################## 
+################## Common functions ##################
 def execSQL(conn,sql,params=''):
     cursor=conn.cursor()
     cursor.execute(sql,params)
     return cursor
+
+# Database errors that can be raised per-table by transient/concurrent activity
+# (concurrent delete, relation dropped mid-scan, ...). PyGreSQL surfaces these as
+# pg.DatabaseError; pgdb.DatabaseError is included for completeness. Built as a
+# tuple so we only reference the classes that actually imported.
+_DB_ERRORS = tuple(
+    cls for cls in (
+        globals().get('pg') and getattr(pg, 'DatabaseError', None),
+        globals().get('pgdb') and getattr(pgdb, 'DatabaseError', None),
+    ) if cls is not None
+) or (Exception,)
 
 def get_hosts_list(dbconn):
     hosts = execSQL(dbconn,get_hosts_sql)
@@ -1236,14 +1266,44 @@ def ao_table_bloat_check(pg_version, db_list, rpt_format):
     for db in db_list:
         dbconn = pgdb.connect(database=db, host='{0}:{1}'.format(MASTER_HOST_NAME,MASTER_PORT), user='gpadmin')
         if pg_version == 'legacy2' or pg_version == 'cbdb':
-            cursor = execSQL(dbconn, get_legacy2_ao_bloat_sql)
-            bloat_result = cursor.fetchall()
-            column_names_list = [row[0] for row in cursor.description]
+            cursor = execSQL(dbconn, get_legacy2_ao_table_list_sql)
+            table_list = cursor.fetchall()
+            column_names_list = ['oid', 'schema_name', 'table_name', 'num_rows',
+                                 'percent_hidden', 'total_tupcount', 'hidden_tupcount']
             bloat_table = PrettyTable(column_names_list)
-            if cursor.rowcount > 0:
-                check_result = 'NOT OK'
-                for row in bloat_result:
-                    bloat_table.add_row(row)
+            # Probe each AO table on its own so a concurrent DELETE/VACUUM/DROP on
+            # one table (raising "could not open relation with OID ...") only skips
+            # that table instead of aborting the whole check. Skipped tables are
+            # reported below rather than silently dropped.
+            skipped_tables = []
+            for oid, schema_name, table_name, num_rows in table_list:
+                try:
+                    cursor = execSQL(dbconn, get_legacy2_ao_bloat_info_sql, (oid,))
+                    bloat_result = cursor.fetchone()
+                except _DB_ERRORS:
+                    # The failed statement aborts the transaction; roll back so the
+                    # next table can be probed on the same connection.
+                    dbconn.rollback()
+                    skipped_tables.append('{0}.{1}'.format(schema_name, table_name))
+                    continue
+                if bloat_result is None:
+                    continue
+                percent_hidden, total_tupcount, hidden_tupcount = bloat_result
+                if percent_hidden is None:
+                    continue
+                if percent_hidden > TABLE_BLOAT_PERCENT:
+                    check_result = 'NOT OK'
+                    bloat_table.add_row([oid, schema_name, table_name, num_rows,
+                                         percent_hidden, total_tupcount, hidden_tupcount])
+            if skipped_tables:
+                note = ('Note: %d AO table(s) skipped due to concurrent activity '
+                        '(could not read visimap): %s'
+                        % (len(skipped_tables), ', '.join(skipped_tables)))
+                if rpt_format == 'text':
+                    check_result_detail += '\nDatabase: ' + db + '\n' + note + '\n'
+                if rpt_format == 'html':
+                    check_result_detail += ('<div style="clear:both"><br><i>'
+                                            + note + '</i></div>\n')
         if pg_version == 'legacy3':
             cursor = execSQL(dbconn,get_ao_table_list_sql)
             table_list = cursor.fetchall()
