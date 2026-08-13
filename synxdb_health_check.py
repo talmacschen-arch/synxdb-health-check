@@ -198,7 +198,7 @@ as select c.oid,n.nspname as schemaname,c.relname as tablename,
 (case when c.relpages > 0 then c.relpages::bigint * 32/1024
       else (pg_relation_size(c.oid)/1024/1024) end)::bigint as size_mb
 from pg_class c join pg_namespace n on c.relnamespace=n.oid
-where c.relkind='r'
+where c.relkind='r' and c.relpersistence <> 't'
 '''
 get_db_size_sql = '''select round(sum(size_mb)/1024.0,2) as db_size_gb from public.mpp_table_size where schemaname not like 'pg\_%'
 '''
@@ -510,6 +510,38 @@ _DB_ERRORS = tuple(
         globals().get('pgdb') and getattr(pgdb, 'DatabaseError', None),
     ) if cls is not None
 ) or (Exception,)
+
+# The three size checks read pg_relation_size() over every relation in the
+# public.mpp_table_size view. Temp tables are excluded from the view, but a
+# concurrent DROP of a *regular* table between the catalog scan and the size
+# computation still raises "could not open file ..." and aborts the whole
+# statement. The view is created in the same uncommitted transaction as the
+# query, so rolling back the aborted transaction also drops the view -- recreate
+# it before each retry. The dropped relation is gone from the next transaction's
+# snapshot, so a fresh attempt succeeds. Give up after a few tries and let the
+# caller skip that database's size rather than crash the whole health check.
+SIZE_QUERY_RETRIES = 3
+SIZE_QUERY_RETRY_WAIT = 2
+
+def run_size_query(dbconn, query_sql):
+    for attempt in range(SIZE_QUERY_RETRIES):
+        try:
+            execSQL(dbconn, create_mpp_table_size_view_sql)
+            return execSQL(dbconn, query_sql)
+        except _DB_ERRORS:
+            dbconn.rollback()
+            if attempt == SIZE_QUERY_RETRIES - 1:
+                raise
+            time.sleep(SIZE_QUERY_RETRY_WAIT)
+
+def size_skip_note(db, rpt_format):
+    note = ('size skipped after %d retries due to concurrent DDL activity '
+            '(a table was dropped while its size was being read)'
+            % SIZE_QUERY_RETRIES)
+    if rpt_format == 'html':
+        return ('<div style="clear:both"><br><b><li>Database: ' + db
+                + '</li></b><i> ' + note + '</i></div>\n')
+    return '\nDatabase: ' + db + '\n' + note + '\n'
 
 def get_hosts_list(dbconn):
     hosts = execSQL(dbconn,get_hosts_sql)
@@ -946,8 +978,13 @@ def db_size_check(db_list, rpt_format):
     check_result_detail = ''
     for db in db_list:
         dbconn = pgdb.connect(database=db, host='{0}:{1}'.format(MASTER_HOST_NAME,MASTER_PORT), user='gpadmin')
-        create_mpp_table_size_view = execSQL(dbconn,create_mpp_table_size_view_sql)
-        cursor = execSQL(dbconn,get_db_size_sql)
+        try:
+            cursor = run_size_query(dbconn, get_db_size_sql)
+        except _DB_ERRORS:
+            dbconn.rollback()
+            dbconn.close()
+            check_result_detail += size_skip_note(db, rpt_format)
+            continue
         db_size_result = cursor.fetchone()
         column_names_list = [row[0] for row in cursor.description]
         check_result_table = PrettyTable(column_names_list)
@@ -971,8 +1008,13 @@ def schema_size_check(db_list,rpt_format):
     check_result_detail = ''
     for db in db_list:
         dbconn = pgdb.connect(database=db, host='{0}:{1}'.format(MASTER_HOST_NAME,MASTER_PORT), user='gpadmin')
-        create_mpp_table_size_view = execSQL(dbconn,create_mpp_table_size_view_sql)
-        cursor = execSQL(dbconn,get_schema_size_sql)
+        try:
+            cursor = run_size_query(dbconn, get_schema_size_sql)
+        except _DB_ERRORS:
+            dbconn.rollback()
+            dbconn.close()
+            check_result_detail += size_skip_note(db, rpt_format)
+            continue
         schema_size_result = cursor.fetchall()
         column_names_list = [row[0] for row in cursor.description]
         check_result_table = PrettyTable(column_names_list)
@@ -997,8 +1039,13 @@ def table_size_check(db_list,rpt_format):
     check_result_detail = ''
     for db in db_list:
         dbconn = pgdb.connect(database=db, host='{0}:{1}'.format(MASTER_HOST_NAME,MASTER_PORT), user='gpadmin')
-        create_mpp_table_size_view = execSQL(dbconn,create_mpp_table_size_view_sql)
-        cursor = execSQL(dbconn,get_table_size_sql)
+        try:
+            cursor = run_size_query(dbconn, get_table_size_sql)
+        except _DB_ERRORS:
+            dbconn.rollback()
+            dbconn.close()
+            check_result_detail += size_skip_note(db, rpt_format)
+            continue
         table_size_result = cursor.fetchall()
         column_names_list = [row[0] for row in cursor.description]
         check_result_table = PrettyTable(column_names_list)
