@@ -548,6 +548,36 @@ def get_hosts_list(dbconn):
     hosts_list = [row[0] for row in hosts]
     return hosts_list
 
+def get_host_role_map(dbconn):
+    # Map each hostname to the set of roles it hosts: 'master' for the
+    # coordinator/standby (content = -1) and 'segment' for data segments
+    # (content >= 0). Used to group hosts for the CPU-cores / memory-size
+    # uniformity checks: values must match within the master group (coordinator
+    # vs standby) and within the segment group, but the two groups may
+    # legitimately differ from each other. A co-located host appears in both.
+    cursor = execSQL(dbconn,get_segment_config_sql)
+    host_role_map = {}
+    for row in cursor.fetchall():
+        content = row[1]
+        hostname = row[7]
+        role = 'master' if content == -1 else 'segment'
+        host_role_map.setdefault(hostname, set()).add(role)
+    return host_role_map
+
+def _host_role_label(host, host_role_map):
+    return ','.join(sorted(host_role_map.get(host) or ['unknown']))
+
+def _grouped_values_consistent(host_role_map, host_value_pairs):
+    # host_value_pairs: list of (host, value). Return True only if every role
+    # group holds a single distinct value. A co-located host contributes its
+    # value to both groups. <= 1 (not == 1) so a group with a single host
+    # (e.g. no standby) or an empty group is still consistent.
+    group_values = {}
+    for host, value in host_value_pairs:
+        for role in host_role_map.get(host, set()):
+            group_values.setdefault(role, set()).add(value)
+    return all(len(values) <= 1 for values in group_values.values())
+
 def get_db_list(dbconn):
     cursor = execSQL(dbconn,get_db_names_sql)
     db_names_list = cursor.fetchall()
@@ -775,17 +805,17 @@ def clock_sync_check(hosts_list, rpt_format):
     clock_sync_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
     return (check_item, check_result, clock_sync_check_output)
 
-def cpu_cores_check(hosts_list,rpt_format):
+def cpu_cores_check(hosts_list,host_role_map,rpt_format):
     check_item = 'CPU Cores'
     check_result = 'OK'
     cpu_cores_check_list= []
-    check_result_table = PrettyTable(["Host","CPU Cores"])
+    check_result_table = PrettyTable(["Host","Role","CPU Cores"])
     for host in hosts_list:
         cpu_cores_cmd = 'ssh gpadmin@%s "cat /proc/cpuinfo| grep "processor"| wc -l"' % (host)
         cpu_cores_output = _execute_shell_command(cpu_cores_cmd)
-        cpu_cores_check_list.append(cpu_cores_output)
-        check_result_table.add_row([host,cpu_cores_output])
-    if len(set(cpu_cores_check_list)) != 1:
+        cpu_cores_check_list.append((host,cpu_cores_output))
+        check_result_table.add_row([host,_host_role_label(host,host_role_map),cpu_cores_output])
+    if not _grouped_values_consistent(host_role_map,cpu_cores_check_list):
         check_result = 'NOT OK'
     if rpt_format == 'text': 
         check_result_detail = check_result_table.get_string()
@@ -799,17 +829,17 @@ def cpu_cores_check(hosts_list,rpt_format):
     cpu_cores_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
     return (check_item, check_result, cpu_cores_check_output)   
 
-def memory_size_check(hosts_list,rpt_format):
+def memory_size_check(hosts_list,host_role_map,rpt_format):
     check_item = 'Memory Size'
     check_result = 'OK'
     memory_size_check_list= []
-    check_result_table = PrettyTable(["Host","Memory Size"])
+    check_result_table = PrettyTable(["Host","Role","Memory Size"])
     for host in hosts_list:
         memory_size_check_cmd = 'ssh gpadmin@%s "free -g" | grep Mem | awk \'{print $2}\'' % (host)
         memory_size_check_output = _execute_shell_command(memory_size_check_cmd)
-        memory_size_check_list.append(memory_size_check_output)
-        check_result_table.add_row([host,memory_size_check_output + 'GB'])
-    if len(set(memory_size_check_list)) != 1:
+        memory_size_check_list.append((host,memory_size_check_output))
+        check_result_table.add_row([host,_host_role_label(host,host_role_map),memory_size_check_output + 'GB'])
+    if not _grouped_values_consistent(host_role_map,memory_size_check_list):
         check_result = 'NOT OK'
     if rpt_format == 'text': 
         check_result_detail = check_result_table.get_string()
@@ -1520,7 +1550,8 @@ def synxdb_health_check(configs):
     rpt_format = configs['report_format']
     dbconn = pgdb.connect(database='postgres', host='{0}:{1}'.format(MASTER_HOST_NAME,MASTER_PORT), user='gpadmin')
     hosts_list = get_hosts_list(dbconn)
-    db_list = get_db_list(dbconn)  
+    host_role_map = get_host_role_map(dbconn)
+    db_list = get_db_list(dbconn)
     pg_version = get_pg_version(dbconn)
     create_mpp_table_size_view = execSQL(dbconn,create_mpp_table_size_view_sql)
 
@@ -1548,12 +1579,12 @@ def synxdb_health_check(configs):
         print('Done')
     if configs['cpu_cores_check']['enabled']:
         print('Checking CPU cores...')
-        cpu_cores_check_output = cpu_cores_check(hosts_list,rpt_format)
+        cpu_cores_check_output = cpu_cores_check(hosts_list,host_role_map,rpt_format)
         report_output_list.append(cpu_cores_check_output)
         print('Done')
     if configs['memory_size_check']['enabled']:
         print('Checking physical memory size...')
-        memory_size_check_output = memory_size_check(hosts_list,rpt_format)
+        memory_size_check_output = memory_size_check(hosts_list,host_role_map,rpt_format)
         report_output_list.append(memory_size_check_output)
         print('Done')
     if configs['diskspace_check']['enabled']:
