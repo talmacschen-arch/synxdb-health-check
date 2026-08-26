@@ -47,6 +47,9 @@ res_queue_check:
 resgroup_check:
   enabled: true
 
+resgroup_cgroup_check:
+  enabled: true
+
 db_size_check:
   enabled: true
 

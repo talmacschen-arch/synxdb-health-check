@@ -133,6 +133,7 @@ ORDER BY p.name
 get_resqueue_sql = 'SELECT * FROM gp_toolkit.gp_resqueue_status'
 get_resgroup_sql = 'SELECT * FROM gp_toolkit.gp_resgroup_config'
 get_resource_manager_sql = 'show gp_resource_manager'
+get_resgroup_cgroup_parent_sql = 'show gp_resource_group_cgroup_parent'
 get_resource_manager_gpconfig_cmd = 'gpconfig -s gp_resource_manager'
 check_standby_sql_pg9 = 'SELECT pid, state FROM pg_stat_replication'
 check_standby_sql_pg8 = 'SELECT procpid, state FROM pg_stat_replication'
@@ -612,6 +613,16 @@ def get_resource_manager_mode(dbconn):
         cursor = execSQL(dbconn, get_resource_manager_sql)
         mode = cursor.fetchone()[0]
     return mode
+
+def get_resgroup_cgroup_parent(dbconn):
+    # gp_resource_group_cgroup_parent names the per-node directory under
+    # /sys/fs/cgroup that the cluster delegates resource-group control to
+    # (e.g. 'gpdb.service' or 'synxdb.service'). It is set at postmaster start,
+    # so the coordinator session value is authoritative for which directory
+    # resgroup_cgroup_check should probe -- no need to guess the naming.
+    cursor = execSQL(dbconn, get_resgroup_cgroup_parent_sql)
+    row = cursor.fetchone()
+    return row[0].strip() if row and row[0] else ''
 
 def check_items_output(check_item, check_result, check_result_detail, rpt_format):
     green_print_flag = '\033[1;32m'
@@ -1229,6 +1240,101 @@ def resgroup_check(dbconn,resource_manager,rpt_format):
     resgroup_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
     return (check_item, check_result, resgroup_check_output)
 
+def resgroup_cgroup_check(hosts_list, cgroup_parent, rpt_format):
+    # Resource groups on SynxDB4 require cgroup v2 to be prepared on *every*
+    # node before the cluster starts. This check probes each host over the
+    # existing ssh gpadmin@host channel for the documented preconditions:
+    #   - the cgroup fs is unified v2 (`stat -fc %T /sys/fs/cgroup` -> cgroup2fs)
+    #   - the kernel was booted with systemd.unified_cgroup_hierarchy=1
+    #   - the cpuset/io/cpu/memory controllers are delegated in
+    #     cgroup.subtree_control
+    #   - the per-node resource-group cgroup parent dir is owned by gpadmin. Its
+    #     name is not guessed: `gp_resource_group_cgroup_parent` (passed in as
+    #     cgroup_parent, e.g. 'gpdb.service' or 'synxdb.service') is the cluster's
+    #     authoritative value for which /sys/fs/cgroup/<parent> dir it delegates
+    #     control to.
+    #   - gpadmin can write /sys/fs/cgroup/cgroup.procs
+    #   - when the parent is a systemd unit (<name>.service), that unit is active
+    # Any host missing any item makes the result NOT OK.
+    check_item = 'Resource Group Cgroup Preconditions'
+    check_result = 'OK'
+    check_result_detail = ''
+    required_controllers = ['cpuset', 'io', 'cpu', 'memory']
+    # cgroup_parent comes from a postmaster GUC, but it is interpolated into a
+    # remote shell command, so refuse anything but a plain cgroup dir name.
+    if not cgroup_parent or not re.match(r'^[A-Za-z0-9._-]+$', cgroup_parent):
+        check_result = 'NOT OK'
+        msg = ('Could not determine a valid gp_resource_group_cgroup_parent (got: %r); '
+               'cannot check the resource-group cgroup directory.' % cgroup_parent)
+        check_result_detail = msg
+        resgroup_cgroup_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
+        return (check_item, check_result, resgroup_cgroup_check_output)
+    # A parent ending in .service is a systemd-delegated unit whose active state
+    # is meaningful; a bare dir name (manual setup) has no unit to check.
+    parent_is_service = cgroup_parent.endswith('.service')
+    check_result_table = PrettyTable(["Host","cgroup v2","unified kernel","controllers","parent owner","procs writable","service","Compliant"])
+    # One line per probe as KEY=value so an empty value (e.g. a missing file)
+    # never shifts the parsing; every echo exits 0 so the ssh command as a whole
+    # succeeds even when the unit is inactive or a path is absent.
+    remote_cmd = ('echo FSTYPE=$(stat -fc %T /sys/fs/cgroup/ 2>/dev/null); '
+                  'echo CMDLINE=$(cat /proc/cmdline 2>/dev/null); '
+                  'echo SUBTREE=$(cat /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null); '
+                  'echo PARENT_OWNER=$(stat -c %U /sys/fs/cgroup/' + cgroup_parent + ' 2>/dev/null); '
+                  'echo PROCS_W=$(test -w /sys/fs/cgroup/cgroup.procs && echo yes || echo no); '
+                  'echo SVC_ACTIVE=$(systemctl is-active ' + cgroup_parent + ' 2>/dev/null)')
+    for host in hosts_list:
+        cgroup_cmd = "ssh gpadmin@" + host + " '" + remote_cmd + "'"
+        cgroup_output = _execute_shell_command(cgroup_cmd)
+        data = {}
+        for line in cgroup_output.splitlines():
+            if '=' in line:
+                key, value = line.split('=', 1)
+                data[key] = value.strip()
+        if 'FSTYPE' not in data:
+            # ssh failed / unreachable host: _execute_shell_command returned an
+            # error string, none of the KEY=value lines are present.
+            check_result = 'NOT OK'
+            check_result_table.add_row([host,'ERROR','ERROR','ERROR','ERROR','ERROR','ERROR','NO'])
+            continue
+        fstype = data.get('FSTYPE', '')
+        cgroup_v2 = (fstype == 'cgroup2fs')
+        unified = 'systemd.unified_cgroup_hierarchy=1' in data.get('CMDLINE', '')
+        subtree = set(data.get('SUBTREE', '').split())
+        missing_controllers = [c for c in required_controllers if c not in subtree]
+        controllers_ok = not missing_controllers
+        parent_owner = data.get('PARENT_OWNER', '')
+        parent_owner_ok = (parent_owner == 'gpadmin')
+        procs_writable = data.get('PROCS_W') == 'yes'
+        svc_state = data.get('SVC_ACTIVE', '')
+        service_ok = (svc_state == 'active') if parent_is_service else True
+        service_cell = svc_state if svc_state else 'none'
+        if not parent_is_service:
+            service_cell = 'n/a'
+        host_ok = (cgroup_v2 and unified and controllers_ok and parent_owner_ok and procs_writable and service_ok)
+        if not host_ok:
+            check_result = 'NOT OK'
+        controllers_cell = 'ok' if controllers_ok else 'missing:' + ','.join(missing_controllers)
+        check_result_table.add_row([host,
+                                    fstype if fstype else 'none',
+                                    'yes' if unified else 'no',
+                                    controllers_cell,
+                                    parent_owner if parent_owner else 'missing',
+                                    'yes' if procs_writable else 'no',
+                                    service_cell,
+                                    'YES' if host_ok else 'NO'])
+    parent_note = 'Resource group cgroup parent (gp_resource_group_cgroup_parent): ' + cgroup_parent
+    if rpt_format == 'text':
+        check_result_detail = parent_note + '\n\n' + check_result_table.get_string()
+    if rpt_format == 'html':
+        check_result_detail = parent_note + '<br><br>' + check_result_table.get_html_string(attributes={
+            'width': '60%',
+            'align': 'left',
+            'BORDERCOLOR': '#330000',
+            'border': '2',
+        })
+    resgroup_cgroup_check_output = check_items_output(check_item, check_result, check_result_detail, rpt_format)
+    return (check_item, check_result, resgroup_cgroup_check_output)
+
 def pg_activity_check(dbconn, pg_version, rpt_format):
     check_item = 'Current Long Running(> 1hr) Queries'
     check_result = 'OK'
@@ -1634,6 +1740,12 @@ def synxdb_health_check(configs):
             print('Checking resource group settings...')
             resgroup_check_output = resgroup_check(dbconn, resource_manager, rpt_format)
             report_output_list.append(resgroup_check_output)
+            print('Done')
+        if configs['resgroup_cgroup_check']['enabled']:
+            print('Checking resource group cgroup v2 preconditions...')
+            cgroup_parent = get_resgroup_cgroup_parent(dbconn)
+            resgroup_cgroup_check_output = resgroup_cgroup_check(hosts_list, cgroup_parent, rpt_format)
+            report_output_list.append(resgroup_cgroup_check_output)
             print('Done')
     else:
         if configs['res_queue_check']['enabled']:
